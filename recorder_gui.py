@@ -1,0 +1,889 @@
+#!/usr/bin/env python3
+"""
+多相机+IMU数据采集录制系统 - GUI版本 (多进程架构)
+同时录制多个相机视频和IMU数据
+
+架构说明：
+- 每个相机在独立进程中运行，完全绑过 Python GIL
+- 采集和写入在同一进程中完成，无跨进程大数据传输
+- 预览帧通过共享内存传递（低开销）
+"""
+
+import cv2
+import numpy as np
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from pathlib import Path
+from datetime import datetime
+import queue
+import yaml
+import sys
+import os
+import multiprocessing as mp
+
+# 添加imu和camera模块路径
+sys.path.insert(0, str(Path(__file__).parent / 'imu'))
+sys.path.insert(0, str(Path(__file__).parent / 'camera'))
+
+from camera.multi_camera import list_cameras
+from camera.mp_camera import MultiCameraManager  # 多进程相机管理器
+from imu.imu_manager import IMUManager
+
+
+# 注意: SyncController 和 VideoRecorder 已被多进程版本 MultiCameraManager 替代
+# 多进程版本位于 camera/mp_camera.py，每个相机在独立进程中运行
+
+
+class IMURecorder:
+    """IMU数据录制器"""
+    
+    def __init__(self, port, baudrate=460800):
+        self.port = port
+        self.baudrate = baudrate
+        self.manager = None
+        self.is_recording = False
+        self.data_queue = queue.Queue()
+        self.start_time = None
+        self.file = None
+        self.data_count = 0
+        
+    def start(self, output_path):
+        """开始录制"""
+        try:
+            # 创建IMU管理器
+            config = {
+                'port': self.port,
+                'baudrate': self.baudrate,
+                'debug': False
+            }
+            self.manager = IMUManager(config)
+            
+            # 连接设备
+            if not self.manager.connect():
+                return False
+            
+            # 设置数据回调
+            self.manager.set_data_callback(self._on_imu_data)
+            
+            # 打开文件
+            output_file = output_path / "imu_data.txt"
+            self.file = open(output_file, 'w', encoding='utf-8')
+            
+            # 写入文件头
+            self._write_header()
+            
+            # 启动IMU采集
+            if not self.manager.start():
+                self.file.close()
+                return False
+            
+            self.is_recording = True
+            self.start_time = time.time()
+            self.data_count = 0
+            return True
+            
+        except Exception as e:
+            print(f"IMU启动失败: {e}")
+            if self.file:
+                self.file.close()
+            return False
+    
+    def _write_header(self):
+        """写入CSV格式的文件头"""
+        header = (
+            "# IMU Data Recording\n"
+            f"# Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"# Port: {self.port}, Baudrate: {self.baudrate}\n"
+            "# Format: timestamp(s), roll(deg), pitch(deg), yaw(deg), "
+            "q0, q1, q2, q3, "
+            "acc_x(g), acc_y(g), acc_z(g), "
+            "gyro_x(deg/s), gyro_y(deg/s), gyro_z(deg/s), "
+            "mag_x, mag_y, mag_z, temp(C)\n"
+        )
+        self.file.write(header)
+        self.file.flush()
+    
+    def _on_imu_data(self, data):
+        """IMU数据回调"""
+        if self.is_recording and self.start_time:
+            timestamp = time.time() - self.start_time
+            self.data_queue.put((timestamp, data))
+    
+    def flush_data(self):
+        """将队列中的数据写入文件"""
+        if not self.is_recording:
+            return 0
+        
+        count = 0
+        while not self.data_queue.empty():
+            try:
+                timestamp, data = self.data_queue.get_nowait()
+                
+                # 格式化数据行
+                line = (
+                    f"{timestamp:.6f},"
+                    f"{data['roll']:.3f},{data['pitch']:.3f},{data['yaw']:.3f},"
+                    f"{data['q0']:.6f},{data['q1']:.6f},{data['q2']:.6f},{data['q3']:.6f},"
+                    f"{data['acc_x']:.6f},{data['acc_y']:.6f},{data['acc_z']:.6f},"
+                    f"{data['gyro_x']:.3f},{data['gyro_y']:.3f},{data['gyro_z']:.3f},"
+                    f"{data['norm_mag_x']:.6f},{data['norm_mag_y']:.6f},{data['norm_mag_z']:.6f},"
+                    f"{data['sensor_temp']:.2f}\n"
+                )
+                
+                self.file.write(line)
+                self.data_count += 1
+                count += 1
+                
+            except queue.Empty:
+                break
+        
+        if count > 0:
+            self.file.flush()
+        
+        return count
+    
+    def reset_start_time(self):
+        """重置起始时间（用于与相机同步）"""
+        # 清空队列中之前的数据
+        while not self.data_queue.empty():
+            try:
+                self.data_queue.get_nowait()
+            except queue.Empty:
+                break
+        # 重置起始时间
+        self.start_time = time.time()
+        self.data_count = 0
+        print(f"IMU 起始时间已重置: {self.start_time:.6f}")
+    
+    def stop(self):
+        """停止录制"""
+        self.is_recording = False
+        
+        # 停止IMU管理器
+        if self.manager:
+            self.manager.stop()
+        
+        # 写入剩余数据
+        self.flush_data()
+        
+        # 关闭文件
+        if self.file:
+            self.file.close()
+    
+    def get_latest_data(self):
+        """获取最新的IMU数据用于显示"""
+        if self.manager:
+            return self.manager.get_data()
+        return None
+
+
+class RecorderGUI:
+    """录制系统GUI主窗口 - 多进程架构版本"""
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.title("多相机+IMU数据采集系统 (多进程)")
+        self.root.geometry("1200x800")
+        
+        # 加载配置
+        self.config = self.load_config()
+        
+        # 录制器
+        self.camera_manager = None  # 多进程相机管理器
+        self.camera_ids = []  # 成功启动的相机ID列表
+        self.imu_recorder = None
+        self.is_recording = False
+        
+        # 录制参数
+        self.output_dir = Path.home() / "recordings"
+        self.current_session_dir = None
+        self.recording_start_time = None
+        
+        # 定时器
+        self.update_timer = None
+        self.imu_flush_timer = None
+        
+        # 创建UI
+        self.create_ui()
+        
+        # 初始化相机列表
+        self.scan_cameras()
+    
+    def load_config(self):
+        """加载配置文件"""
+        try:
+            config_path = Path(__file__).parent / "config.yaml"
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"配置文件加载失败: {e}")
+        return {}
+    
+    def create_ui(self):
+        """创建用户界面"""
+        # 主容器
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 配置网格权重
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(1, weight=1)
+        
+        # 标题
+        title_label = ttk.Label(
+            main_frame,
+            text="多相机+IMU数据采集系统",
+            font=('Arial', 16, 'bold')
+        )
+        title_label.grid(row=0, column=0, columnspan=2, pady=10)
+        
+        # 左侧控制面板
+        self.create_control_panel(main_frame)
+        
+        # 右侧预览面板
+        self.create_preview_panel(main_frame)
+        
+        # 底部状态栏
+        self.create_status_bar(main_frame)
+    
+    def create_control_panel(self, parent):
+        """创建控制面板"""
+        control_frame = ttk.LabelFrame(parent, text="控制面板", padding="10")
+        control_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
+        
+        row = 0
+        
+        # === 相机设置 ===
+        ttk.Label(control_frame, text="相机设置", font=('Arial', 12, 'bold')).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
+        )
+        row += 1
+        
+        # 相机ID列表
+        ttk.Label(control_frame, text="相机ID:").grid(row=row, column=0, sticky=tk.W)
+        self.camera_ids_var = tk.StringVar(
+            value=','.join(map(str, self.config.get('camera', {}).get('ids', [0])))
+        )
+        camera_ids_entry = ttk.Entry(control_frame, textvariable=self.camera_ids_var, width=30)
+        camera_ids_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+        
+        # 扫描相机按钮
+        ttk.Button(control_frame, text="扫描可用相机", command=self.scan_cameras).grid(
+            row=row, column=0, columnspan=2, pady=5
+        )
+        row += 1
+        
+        # 相机分辨率
+        ttk.Label(control_frame, text="分辨率:").grid(row=row, column=0, sticky=tk.W)
+        resolution_frame = ttk.Frame(control_frame)
+        resolution_frame.grid(row=row, column=1, sticky=(tk.W, tk.E))
+        
+        self.width_var = tk.IntVar(value=self.config.get('camera', {}).get('width', 640))
+        self.height_var = tk.IntVar(value=self.config.get('camera', {}).get('height', 480))
+        
+        ttk.Entry(resolution_frame, textvariable=self.width_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(resolution_frame, text=" x ").pack(side=tk.LEFT)
+        ttk.Entry(resolution_frame, textvariable=self.height_var, width=8).pack(side=tk.LEFT)
+        row += 1
+        
+        # 帧率
+        ttk.Label(control_frame, text="录制帧率:").grid(row=row, column=0, sticky=tk.W)
+        self.fps_var = tk.IntVar(value=30)
+        fps_spinbox = ttk.Spinbox(control_frame, from_=1, to=60, textvariable=self.fps_var, width=28)
+        fps_spinbox.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+        
+        # === IMU设置 ===
+        ttk.Separator(control_frame, orient=tk.HORIZONTAL).grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15
+        )
+        row += 1
+        
+        ttk.Label(control_frame, text="IMU设置", font=('Arial', 12, 'bold')).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
+        )
+        row += 1
+        
+        # IMU串口
+        ttk.Label(control_frame, text="串口:").grid(row=row, column=0, sticky=tk.W)
+        self.imu_port_var = tk.StringVar(
+            value=self.config.get('imu', {}).get('port', '/dev/tty.usbserial-5B0B0295361')
+        )
+        imu_port_entry = ttk.Entry(control_frame, textvariable=self.imu_port_var, width=30)
+        imu_port_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+        
+        # IMU波特率
+        ttk.Label(control_frame, text="波特率:").grid(row=row, column=0, sticky=tk.W)
+        self.imu_baud_var = tk.IntVar(value=self.config.get('imu', {}).get('bps', 460800))
+        imu_baud_entry = ttk.Entry(control_frame, textvariable=self.imu_baud_var, width=30)
+        imu_baud_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+        
+        # === 输出设置 ===
+        ttk.Separator(control_frame, orient=tk.HORIZONTAL).grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15
+        )
+        row += 1
+        
+        ttk.Label(control_frame, text="输出设置", font=('Arial', 12, 'bold')).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
+        )
+        row += 1
+        
+        # 输出目录
+        ttk.Label(control_frame, text="输出目录:").grid(row=row, column=0, sticky=tk.W)
+        self.output_dir_var = tk.StringVar(value=str(self.output_dir))
+        ttk.Entry(control_frame, textvariable=self.output_dir_var, width=30, state='readonly').grid(
+            row=row, column=1, sticky=(tk.W, tk.E), pady=5
+        )
+        row += 1
+        
+        ttk.Button(control_frame, text="选择输出目录", command=self.select_output_dir).grid(
+            row=row, column=0, columnspan=2, pady=5
+        )
+        row += 1
+        
+        # === 录制控制 ===
+        ttk.Separator(control_frame, orient=tk.HORIZONTAL).grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15
+        )
+        row += 1
+        
+        # 录制按钮
+        self.record_button = ttk.Button(
+            control_frame,
+            text="开始录制",
+            command=self.toggle_recording,
+            style='Record.TButton'
+        )
+        self.record_button.grid(row=row, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E))
+        
+        # 配置录制按钮样式
+        style = ttk.Style()
+        style.configure('Record.TButton', font=('Arial', 14, 'bold'))
+        
+        control_frame.columnconfigure(1, weight=1)
+    
+    def create_preview_panel(self, parent):
+        """创建预览面板"""
+        preview_frame = ttk.LabelFrame(parent, text="相机预览", padding="10")
+        preview_frame.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 创建Canvas用于显示视频
+        self.preview_canvas = tk.Canvas(preview_frame, bg='black')
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # IMU数据显示
+        imu_frame = ttk.LabelFrame(preview_frame, text="IMU数据", padding="5")
+        imu_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        self.imu_text = tk.Text(imu_frame, height=6, state='disabled', font=('Courier', 9))
+        self.imu_text.pack(fill=tk.BOTH, expand=True)
+    
+    def create_status_bar(self, parent):
+        """创建状态栏"""
+        status_frame = ttk.Frame(parent)
+        status_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+        
+        self.status_var = tk.StringVar(value="就绪")
+        status_label = ttk.Label(status_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 录制时间显示
+        self.record_time_var = tk.StringVar(value="00:00:00")
+        time_label = ttk.Label(
+            status_frame,
+            textvariable=self.record_time_var,
+            relief=tk.SUNKEN,
+            font=('Arial', 10, 'bold')
+        )
+        time_label.pack(side=tk.RIGHT, padx=(10, 0))
+    
+    def scan_cameras(self):
+        """扫描可用相机"""
+        self.status_var.set("正在扫描相机...")
+        self.root.update()
+        
+        available = list_cameras()
+        
+        if available:
+            self.camera_ids_var.set(','.join(map(str, available)))
+            self.status_var.set(f"找到 {len(available)} 个相机: {available}")
+        else:
+            self.status_var.set("未找到可用相机")
+            messagebox.showwarning("警告", "未找到可用的相机设备")
+    
+    def select_output_dir(self):
+        """选择输出目录"""
+        directory = filedialog.askdirectory(initialdir=self.output_dir)
+        if directory:
+            self.output_dir = Path(directory)
+            self.output_dir_var.set(str(self.output_dir))
+    
+    def toggle_recording(self):
+        """切换录制状态"""
+        if not self.is_recording:
+            self.start_recording()
+        else:
+            self.stop_recording()
+    
+    def start_recording(self):
+        """开始录制 - 多进程架构"""
+        try:
+            # 解析相机ID
+            camera_ids_str = self.camera_ids_var.get().strip()
+            if not camera_ids_str:
+                messagebox.showerror("错误", "请输入相机ID")
+                return
+            
+            camera_ids = [int(x.strip()) for x in camera_ids_str.split(',')]
+            
+            if not camera_ids:
+                messagebox.showerror("错误", "没有有效的相机ID")
+                return
+            
+            # 创建会话目录
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_session_dir = self.output_dir / f"recording_{timestamp}"
+            self.current_session_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 初始化视频录制器
+            width = self.width_var.get()
+            height = self.height_var.get()
+            fps = self.fps_var.get()
+            
+            self.status_var.set("正在启动相机进程...")
+            self.root.update()
+            
+            # 创建多进程相机管理器
+            print(f"\n=== 启动多进程相机系统 ===")
+            print(f"目标帧率: {fps} fps, 分辨率: {width}x{height}")
+            print(f"相机ID: {camera_ids}")
+            
+            self.camera_manager = MultiCameraManager(camera_ids, width, height, fps)
+            
+            # 启动所有相机进程
+            self.camera_ids = self.camera_manager.start_all(self.current_session_dir)
+            
+            if not self.camera_ids:
+                messagebox.showerror("错误", "没有成功初始化任何相机")
+                self.cleanup_recording()
+                return
+            
+            print(f"成功启动 {len(self.camera_ids)} 个相机进程: {self.camera_ids}")
+            
+            # 初始化IMU录制器
+            self.status_var.set("正在初始化IMU...")
+            self.root.update()
+            
+            imu_port = self.imu_port_var.get()
+            imu_baud = self.imu_baud_var.get()
+            
+            self.imu_recorder = IMURecorder(imu_port, imu_baud)
+            if not self.imu_recorder.start(self.current_session_dir):
+                messagebox.showwarning("警告", "IMU初始化失败，将仅录制视频")
+                self.imu_recorder = None
+            
+            # 禁用设置控件
+            self.set_controls_state('disabled')
+            
+            # 显示倒计时并同步启动录制
+            self._show_countdown_and_start()
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("错误", f"启动录制失败: {e}")
+            self.cleanup_recording()
+    
+    def _show_countdown_and_start(self):
+        """显示倒计时弹窗并同步启动所有相机"""
+        # 创建倒计时弹窗
+        countdown_window = tk.Toplevel(self.root)
+        countdown_window.title("准备录制")
+        countdown_window.geometry("300x200")
+        countdown_window.resizable(False, False)
+        countdown_window.transient(self.root)
+        countdown_window.grab_set()
+        
+        # 居中显示
+        countdown_window.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 300) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 200) // 2
+        countdown_window.geometry(f"+{x}+{y}")
+        
+        # 标题
+        ttk.Label(
+            countdown_window, 
+            text="相机同步中...", 
+            font=('Arial', 12)
+        ).pack(pady=10)
+        
+        # 倒计时数字
+        countdown_var = tk.StringVar(value="3")
+        countdown_label = ttk.Label(
+            countdown_window, 
+            textvariable=countdown_var, 
+            font=('Arial', 72, 'bold'),
+            foreground='#2196F3'
+        )
+        countdown_label.pack(pady=10)
+        
+        # 状态提示
+        status_var = tk.StringVar(value="准备同步所有相机...")
+        ttk.Label(countdown_window, textvariable=status_var).pack(pady=10)
+        
+        # 倒计时逻辑
+        def do_countdown(count):
+            if count > 0:
+                countdown_var.set(str(count))
+                status_var.set(f"即将开始录制...")
+                countdown_window.after(1000, lambda: do_countdown(count - 1))
+            else:
+                countdown_var.set("GO!")
+                status_var.set("同步启动所有相机!")
+                countdown_window.after(300, finish_countdown)
+        
+        def finish_countdown():
+            countdown_window.destroy()
+            self._finalize_recording_start()
+        
+        # 开始倒计时
+        countdown_window.after(100, lambda: do_countdown(3))
+    
+    def _finalize_recording_start(self):
+        """完成录制启动（倒计时结束后）"""
+        # 更新UI
+        self.is_recording = True
+        self.record_button.config(text="停止录制 ⏹")
+        self.status_var.set(f"正在录制到: {self.current_session_dir.name}")
+        
+        # 重置 IMU 起始时间（与相机同步）
+        if self.imu_recorder:
+            self.imu_recorder.reset_start_time()
+        
+        # 开始所有相机录制（带同步时间点）
+        print("发送同步开始录制信号...")
+        sync_time = self.camera_manager.begin_recording(countdown_seconds=0.1)
+        print(f"同步时间点: {sync_time:.6f}")
+        
+        # 开始UI更新
+        self.recording_start_time = time.perf_counter()
+        self.schedule_update()
+        
+        # 启动IMU数据刷新循环
+        self.schedule_imu_flush()
+        
+        print(f"所有系统已启动，开始多进程录制 {len(self.camera_ids)} 个相机\n")
+    
+    def schedule_imu_flush(self):
+        """调度IMU数据刷新"""
+        if not self.is_recording:
+            return
+        
+        # 刷新IMU数据到文件
+        if self.imu_recorder:
+            self.imu_recorder.flush_data()
+        
+        # 每50ms刷新一次IMU数据
+        self.imu_flush_timer = self.root.after(50, self.schedule_imu_flush)
+    
+    def schedule_update(self):
+        """调度UI更新"""
+        if not self.is_recording:
+            return
+        
+        # 更新录制时间
+        elapsed = time.perf_counter() - self.recording_start_time
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+        self.record_time_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        
+        # 更新预览
+        self.update_preview()
+        
+        # 更新IMU显示
+        if self.imu_recorder:
+            self.update_imu_display()
+        
+        # 每333ms更新一次（3fps预览，大幅减少UI负担）
+        self.update_timer = self.root.after(333, self.schedule_update)
+    
+    def update_preview(self):
+        """更新相机预览 - 从多进程共享内存读取，显示所有相机网格"""
+        if not self.camera_manager:
+            return
+        
+        try:
+            # 从多进程管理器获取所有预览帧
+            preview_frames = self.camera_manager.get_all_previews()
+            all_stats = self.camera_manager.get_all_stats()
+            
+            if not preview_frames:
+                return
+            
+            frames = []
+            num_cams = len(self.camera_ids)
+            
+            for cam_id in self.camera_ids:
+                frame = preview_frames.get(cam_id)
+                stats = all_stats.get(cam_id)
+                
+                if frame is not None:
+                    # 根据相机数量决定缩略图大小
+                    if num_cams <= 2:
+                        thumb_size = (320, 240)
+                    elif num_cams <= 4:
+                        thumb_size = (240, 180)
+                    else:
+                        thumb_size = (160, 120)
+                    
+                    small = cv2.resize(frame, thumb_size, interpolation=cv2.INTER_NEAREST)
+                    
+                    # 添加相机ID和帧数标签
+                    label = f"Cam{cam_id}"
+                    if stats:
+                        label += f" {stats['frames']}f {stats['hw_fps']:.0f}fps"
+                    cv2.putText(small, label, (4, 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                    frames.append(small)
+            
+            if not frames:
+                return
+            
+            # 根据数量排列成网格
+            if num_cams <= 2:
+                cols = num_cams
+            elif num_cams <= 4:
+                cols = 2
+            elif num_cams <= 9:
+                cols = 3
+            else:
+                cols = 4
+            
+            rows_needed = (len(frames) + cols - 1) // cols
+            
+            # 补齐黑色帧使拼接整齐
+            h, w = frames[0].shape[:2]
+            while len(frames) < rows_needed * cols:
+                frames.append(np.zeros((h, w, 3), dtype=np.uint8))
+            
+            # 拼接网格
+            row_imgs = []
+            for r in range(rows_needed):
+                row_frames = frames[r * cols: (r + 1) * cols]
+                row_imgs.append(cv2.hconcat(row_frames))
+            combined = cv2.vconcat(row_imgs)
+            
+            # 缩放适应canvas
+            canvas_width = self.preview_canvas.winfo_width()
+            canvas_height = self.preview_canvas.winfo_height()
+            
+            if canvas_width > 1 and canvas_height > 1:
+                ch, cw = combined.shape[:2]
+                scale = min(canvas_width / cw, canvas_height / ch) * 0.95
+                new_w = max(1, int(cw * scale))
+                new_h = max(1, int(ch * scale))
+                
+                resized = cv2.resize(combined, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                from PIL import Image, ImageTk
+                img = Image.fromarray(rgb)
+                photo = ImageTk.PhotoImage(image=img)
+                
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_image(
+                    canvas_width // 2, canvas_height // 2, image=photo
+                )
+                self.preview_canvas.image = photo
+                    
+        except Exception as e:
+            print(f"预览更新错误: {e}")
+    
+    def update_imu_display(self):
+        """更新IMU数据显示"""
+        if not self.imu_recorder:
+            return
+        
+        data = self.imu_recorder.get_latest_data()
+        if data:
+            text = (
+                f"姿态角: Roll={data['roll']:7.2f}° Pitch={data['pitch']:7.2f}° Yaw={data['yaw']:7.2f}°\n"
+                f"加速度: X={data['acc_x']:7.3f}g Y={data['acc_y']:7.3f}g Z={data['acc_z']:7.3f}g\n"
+                f"角速度: X={data['gyro_x']:7.2f}°/s Y={data['gyro_y']:7.2f}°/s Z={data['gyro_z']:7.2f}°/s\n"
+                f"磁力计: X={data['norm_mag_x']:7.3f} Y={data['norm_mag_y']:7.3f} Z={data['norm_mag_z']:7.3f}\n"
+                f"温度: {data['sensor_temp']:.1f}°C | 数据包: {self.imu_recorder.data_count}"
+            )
+            
+            self.imu_text.config(state='normal')
+            self.imu_text.delete('1.0', tk.END)
+            self.imu_text.insert('1.0', text)
+            self.imu_text.config(state='disabled')
+    
+    def stop_recording(self):
+        """停止录制 - 多进程架构"""
+        self.is_recording = False
+        
+        # 取消定时器
+        if hasattr(self, 'imu_flush_timer') and self.imu_flush_timer:
+            self.root.after_cancel(self.imu_flush_timer)
+        if hasattr(self, 'update_timer') and self.update_timer:
+            self.root.after_cancel(self.update_timer)
+        
+        self.status_var.set("正在停止相机进程...")
+        self.root.update()
+        
+        # 获取最终统计信息
+        summary_lines = []
+        all_stats = {}
+        target_fps = self.fps_var.get()
+        
+        if self.camera_manager:
+            all_stats = self.camera_manager.get_all_stats()
+            for cam_id in self.camera_ids:
+                stats = all_stats.get(cam_id)
+                if stats:
+                    line = (f"Cam{cam_id}: {stats['frames']}帧, "
+                            f"新帧{stats['new_frames']}({stats['hw_fps']:.1f}fps), "
+                            f"重复{stats['duplicated']}")
+                    print(line)
+                    summary_lines.append(line)
+            
+            # 停止所有相机进程
+            print("\n停止所有相机进程...")
+            self.camera_manager.stop_all()
+        
+        if self.imu_recorder:
+            self.imu_recorder.stop()
+            print(f"IMU: {self.imu_recorder.data_count} 个数据包")
+        
+        # 保存录制信息
+        self.save_recording_info(all_stats)
+        
+        saved_dir = self.current_session_dir
+        
+        # 检查是否有相机帧率不足
+        low_fps_cams = []
+        for cam_id, stats in all_stats.items():
+            if stats and stats['hw_fps'] < target_fps * 0.9:
+                low_fps_cams.append(f"Cam{cam_id}: {stats['hw_fps']:.1f}fps")
+        
+        # 清理
+        self.cleanup_recording()
+        
+        # 更新UI
+        self.record_button.config(text="开始录制")
+        self.status_var.set(f"录制完成: {saved_dir}")
+        self.record_time_var.set("00:00:00")
+        
+        # 启用设置控件
+        self.set_controls_state('normal')
+        
+        msg = f"录制已保存到:\n{saved_dir}\n\n"
+        msg += "\n".join(summary_lines)
+        
+        if low_fps_cams:
+            msg += f"\n\n⚠️ 以下相机硬件帧率不足:\n" + "\n".join(low_fps_cams)
+            msg += f"\n建议: 降低分辨率或减少相机数量"
+        
+        messagebox.showinfo("完成", msg)
+    
+    def save_recording_info(self, all_stats=None):
+        """保存录制信息"""
+        if not self.current_session_dir:
+            return
+        
+        try:
+            info_file = self.current_session_dir / "recording_info.txt"
+            with open(info_file, 'w', encoding='utf-8') as f:
+                f.write(f"录制时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"架构: 多进程 (每个相机独立进程)\n")
+                f.write(f"相机数量: {len(self.camera_ids)}\n")
+                f.write(f"相机ID: {self.camera_ids}\n")
+                f.write(f"分辨率: {self.width_var.get()}x{self.height_var.get()}\n")
+                f.write(f"帧率: {self.fps_var.get()} fps\n")
+                f.write(f"IMU端口: {self.imu_port_var.get()}\n")
+                f.write(f"IMU波特率: {self.imu_baud_var.get()}\n")
+                f.write("\n录制统计:\n")
+                
+                if all_stats:
+                    for cam_id, stats in all_stats.items():
+                        if stats:
+                            f.write(f"  相机 {cam_id}: "
+                                   f"{stats['frames']} 帧, "
+                                   f"新帧 {stats['new_frames']} (硬件{stats['hw_fps']:.1f}fps), "
+                                   f"重复帧 {stats['duplicated']}, "
+                                   f"黑帧 {stats['dropped']}\n")
+                
+                if self.imu_recorder:
+                    f.write(f"  IMU数据: {self.imu_recorder.data_count} 个数据包\n")
+        
+        except Exception as e:
+            print(f"保存录制信息失败: {e}")
+    
+    def cleanup_recording(self):
+        """清理录制资源"""
+        if self.camera_manager:
+            self.camera_manager.stop_all()
+            self.camera_manager = None
+        self.camera_ids = []
+        self.imu_recorder = None
+        self.current_session_dir = None
+    
+    def set_controls_state(self, state):
+        """设置控件启用/禁用状态"""
+        # 这里可以添加更多需要禁用的控件
+        pass
+    
+    def on_closing(self):
+        """窗口关闭事件"""
+        if self.is_recording:
+            if messagebox.askokcancel("退出", "正在录制中，确定要退出吗？"):
+                self.stop_recording()
+                self.root.destroy()
+        else:
+            self.root.destroy()
+
+
+def main():
+    """主函数"""
+    # 检查依赖
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        print("错误: 需要安装 Pillow 库")
+        print("请运行: uv add pillow")
+        return
+    
+    print("=" * 50)
+    print("多相机+IMU数据采集系统 (多进程架构)")
+    print("每个相机在独立进程中运行，绑过 Python GIL")
+    print("=" * 50)
+    
+    # 创建GUI
+    root = tk.Tk()
+    app = RecorderGUI(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    # macOS/Windows 需要在 main guard 内设置 spawn 方式
+    # 这必须在创建任何 Process 之前调用
+    try:
+        mp.set_start_method('spawn')
+    except RuntimeError:
+        pass  # 已经设置过了
+    
+    # Windows 打包需要 freeze_support
+    mp.freeze_support()
+    
+    main()

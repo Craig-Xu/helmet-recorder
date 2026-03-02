@@ -212,7 +212,7 @@ class RecorderGUI:
         self.preview_interval_ms = 120  # 约 8fps 预览，比原 3fps 更流畅
 
         # 页面模式: record / playback
-        self.current_mode = 'record'
+        self.current_mode = None
 
         # 回放状态
         self.recordings_dir = Path.home() / "recordings"
@@ -326,6 +326,24 @@ class RecorderGUI:
     def _format_cam_label(self, video_id: int) -> str:
         cam_id = self.video_to_cam.get(int(video_id), int(video_id))
         return f"Cam{cam_id} (/dev/video{video_id})"
+
+    def _rename_recorded_videos_to_cam_ids(self):
+        """将输出视频按逻辑相机编号重命名（例如 0..7.mp4）。"""
+        if not self.current_session_dir:
+            return
+
+        for video_id in self.camera_ids:
+            cam_id = self.video_to_cam.get(int(video_id), int(video_id))
+            src = self.current_session_dir / f"{int(video_id)}.mp4"
+            dst = self.current_session_dir / f"{int(cam_id)}.mp4"
+            if not src.exists() or src == dst:
+                continue
+            try:
+                if dst.exists():
+                    dst.unlink()
+                src.rename(dst)
+            except Exception as e:
+                print(f"重命名失败 {src.name} -> {dst.name}: {e}")
     
     def create_ui(self):
         """创建用户界面 - 深色主题"""
@@ -728,7 +746,7 @@ class RecorderGUI:
         """切换页面模式：record / playback"""
         if mode not in ('record', 'playback'):
             return
-        if mode == self.current_mode:
+        if mode == self.current_mode and self.current_mode is not None:
             return
 
         if self.is_recording and mode != 'record':
@@ -1389,6 +1407,9 @@ class RecorderGUI:
         if self.imu_recorder:
             self.imu_recorder.stop()
             print(f"IMU: {self.imu_recorder.data_count} 个数据包")
+
+        # 将文件名从 /dev/video 编号转换为逻辑 cam 编号（0..N）
+        self._rename_recorded_videos_to_cam_ids()
         
         # 保存录制信息
         self.save_recording_info(all_stats)

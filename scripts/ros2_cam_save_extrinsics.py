@@ -1,51 +1,45 @@
 #!/usr/bin/env python3
 """
-ros2_save_cam_extrinsics.py
+ros2_cam_save_extrinsics.py
 ───────────────────────────
 收集 ArUco 标定节点发布的 TF (marker_0 → cam{v4l2_id})，
 取若干帧平均后，以 cam3 为基准（主摄像头），将所有相机的
-**相对外参**写入 config.yaml。
+**相对外参**写入 config/config.yaml。
 
 cam3 的外参为单位变换 (identity)，其余相机外参表示各自
 相对于 cam3 坐标系的位姿变换。
 
 前提条件:
-  - ros2_camera_publisher.py   已在运行（发布图像）
-  - ros2_camera_aruco_calib.py 已在运行（持续发布 TF）
-  - config.yaml 中 camera.index_map 已正确填写
+    - ros2_cam_publisher.py   已在运行（发布图像）
+    - ros2_cam_aruco_calib.py 已在运行（持续发布 TF）
+    - config/config.yaml 中 camera.index_map 已正确填写
 
 用法:
-    python3 scripts/ros2_save_cam_extrinsics.py
+        python3 scripts/ros2_cam_save_extrinsics.py
 
-成功后会在 config.yaml 的 camera.extrinsics 节点下写入：
+成功后会在 config/config.yaml 的 camera.extrinsics 节点下写入：
     cam{v4l2_id}:
       physical_id: {物理编号}
       translation: [tx, ty, tz]          # 米, 相对于 cam3
       rotation:    [qx, qy, qz, qw]     # 相对于 cam3
 """
 
-import sys
 import time
-from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
-import yaml
-
-_HERE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_HERE))
 
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 import tf2_ros
 from scipy.spatial.transform import Rotation
+from common import CONFIG_PATH, load_yaml, save_yaml, resolve_cam_to_video
 
 # ── 参数 ──────────────────────────────────────────────────────────────────────
 COLLECT_SECONDS = 5.0    # 每个相机收集多少秒的 TF 样本
 MIN_SAMPLES     = 10     # 至少需要多少样本才认为该相机已完成
 PARENT_FRAME    = 'marker_0'
-CONFIG_PATH     = _HERE / 'config.yaml'
 INDEX_AXIS      = 0      # 0:x, 1:y, 2:z
 INDEX_DESC      = False  # False: x 从小到大 -> physical_id/cam_id 从 0 到 N-1
 MIDDLE_COUNT    = 4      # 中间相机数量
@@ -61,24 +55,6 @@ def quat_mean(quats: np.ndarray) -> np.ndarray:
     _, vecs = np.linalg.eigh(Q.T @ Q)
     q = vecs[:, -1]
     return q / np.linalg.norm(q)
-
-
-def _resolve_cam_to_video(camera_ids: list[int], raw_index_map: dict) -> dict[int, int]:
-    """统一 index_map 为 cam_id -> /dev/video_id，兼容新旧两种配置方向。"""
-    ids = [int(x) for x in camera_ids]
-    id_set = set(ids)
-    raw = {int(k): int(v) for k, v in (raw_index_map or {}).items()}
-    if not raw:
-        return {cid: cid for cid in ids}
-
-    keys = set(raw.keys())
-    vals = set(raw.values())
-
-    if vals.issubset(id_set):
-        return {cam: vid for cam, vid in raw.items() if vid in id_set}
-    if keys.issubset(id_set):
-        return {cam: vid for vid, cam in raw.items() if vid in id_set}
-    return {cam: vid for cam, vid in raw.items()}
 
 
 def _rebase_extrinsics(results: dict, ref_cam_name: str, logger=None) -> dict:
@@ -287,16 +263,14 @@ class ExtrinsicsSaver(Node):
             )
 
         # 写回 config.yaml
-        with open(CONFIG_PATH, 'r') as f:
-            cfg = yaml.safe_load(f) or {}
+        cfg = load_yaml(CONFIG_PATH)
 
         cam_cfg = cfg.setdefault('camera', {})
         cam_cfg['extrinsics'] = results
         if new_index_map:
             cam_cfg['index_map'] = {int(k): int(v) for k, v in new_index_map.items()}
 
-        with open(CONFIG_PATH, 'w') as f:
-            yaml.dump(cfg, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        save_yaml(CONFIG_PATH, cfg)
 
         total = len(self.camera_ids)
         saved = total - len(missing)
@@ -312,12 +286,11 @@ class ExtrinsicsSaver(Node):
 def main(args=None):
     rclpy.init(args=args)
 
-    with open(CONFIG_PATH, 'r') as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml(CONFIG_PATH)
 
     cam_cfg   = cfg.get('camera', {})
     capture_ids = [int(x) for x in cam_cfg.get('ids', [0, 2, 4, 6, 8, 10, 12, 14])]
-    cam_to_video = _resolve_cam_to_video(capture_ids, cam_cfg.get('index_map', {}))
+    cam_to_video = resolve_cam_to_video(capture_ids, cam_cfg.get('index_map', {}))
     cam_ids = sorted(cam_to_video.keys())
 
     node = ExtrinsicsSaver(cam_ids, cam_to_video)

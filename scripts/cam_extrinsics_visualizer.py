@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Visualize camera extrinsics from config.yaml in 3D."""
+"""Visualize camera extrinsics from config/config.yaml in 3D."""
 
-import os
 import argparse
 from matplotlib.lines import Line2D
 import numpy as np
-import yaml
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.spatial.transform import Rotation as R
+
+from common import CONFIG_PATH, load_yaml, sorted_cam_names
 
 # ── colour palette (one per camera, up to 8) ──────────────────────────────
 CAM_COLORS = [
@@ -21,11 +21,6 @@ AXIS_COLORS = {
     "y": "#2ca02c",
     "z": "#1f77b4",
 }
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def draw_camera(
@@ -115,13 +110,11 @@ def parse_args():
 def main():
     args = parse_args()
 
-    cfg_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                            "..", "config.yaml")
-    if not os.path.isfile(cfg_path):
-        print(f"Config not found: {cfg_path}")
+    if not CONFIG_PATH.is_file():
+        print(f"Config not found: {CONFIG_PATH}")
         return
 
-    cfg = load_config(cfg_path)
+    cfg = load_yaml(CONFIG_PATH)
     extrinsics = cfg.get("camera", {}).get("extrinsics")
     if not extrinsics:
         print("No camera extrinsics in config.")
@@ -134,7 +127,7 @@ def main():
     ax = fig.add_subplot(111, projection="3d", computed_zorder=False)
     ax.set_facecolor("#fafafa")
 
-    sorted_names = sorted(extrinsics, key=lambda n: int(n.replace("cam", "")))
+    sorted_names = sorted_cam_names(extrinsics)
     positions = []
 
     for idx, name in enumerate(sorted_names):

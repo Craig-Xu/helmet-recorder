@@ -8,7 +8,7 @@ standalone_calib.py
 在 OpenCV 窗口中显示检测结果和各相机状态。
 
 按键:
-    y  —  保存标定结果（index_map + extrinsics）写入 config.yaml
+    y  —  保存标定结果（index_map + extrinsics）写入 config/config.yaml
     q  —  退出
 
 用法:
@@ -16,21 +16,14 @@ standalone_calib.py
 """
 
 import os
-import sys
 import time
 import threading
-from pathlib import Path
 from collections import defaultdict, deque
 
 import cv2
 import numpy as np
-import yaml
 from scipy.spatial.transform import Rotation
-
-_HERE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_HERE))
-
-CONFIG_PATH = _HERE / "config.yaml"
+from common import CONFIG_PATH, load_yaml, save_yaml
 
 # ── ArUco 参数 ──
 ARUCO_DICT      = cv2.aruco.DICT_6X6_1000
@@ -53,7 +46,7 @@ INDEX_AXIS      = 0          # 0=x
 INDEX_DESC      = False
 MIDDLE_COUNT    = 4
 MIDDLE_Z_ASC    = True
-SWAP_PAIRS      = [(2, 3), (4, 5)]   # 业务修正：排序后交换这些 cam 对
+SWAP_PAIRS      = [ (4, 5)]   # 业务修正：排序后交换这些 cam 对
 REF_CAM_ID      = 3          # 主摄像头新编号
 
 
@@ -62,10 +55,7 @@ REF_CAM_ID      = 3          # 主摄像头新编号
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _load_config() -> dict:
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    return load_yaml(CONFIG_PATH)
 
 
 def _open_camera(dev_id: int, width: int, height: int, fps: int):
@@ -478,11 +468,11 @@ def main():
 
 
 def _save_results(threads: dict[int, "CameraThread"]):
-    """从各线程收集样本，计算外参，排序，rebase，保存到 config.yaml。"""
+    """从各线程收集样本，计算外参，排序，rebase，保存到 config/config.yaml。"""
     print(f"\n{'='*50}")
     print("处理标定结果...")
 
-    # 0. 重新读取 config.yaml，防止覆盖中途修改
+    # 0. 重新读取 config/config.yaml，防止覆盖中途修改
     cfg = _load_config()
 
     # 1. 汇总各相机在 marker 坐标系下的平均位姿
@@ -585,13 +575,12 @@ def _save_results(threads: dict[int, "CameraThread"]):
             print(f"  cam{next_id} <- /dev/video{did} (无旧数据，填 identity)")
             next_id += 1
 
-    # 6. 写入 config.yaml
+    # 6. 写入 config/config.yaml
     cam_cfg = cfg.setdefault("camera", {})
     cam_cfg["index_map"] = {int(k): int(v) for k, v in idx_map.items()}
     cam_cfg["extrinsics"] = final_ext
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    save_yaml(CONFIG_PATH, cfg)
 
     total = len(threads)
     ok_count = total - len(missing)

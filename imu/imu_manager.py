@@ -8,8 +8,13 @@ import os
 import threading
 import time
 from typing import Optional, Dict, Callable
-from port_manager import open_port, close_port, rd_data
-from yis_std_dec import std_decoder
+
+try:
+    from .port_manager import open_port, close_port, rd_data
+    from .yis_std_dec import std_decoder
+except ImportError:
+    from port_manager import open_port, close_port, rd_data
+    from yis_std_dec import std_decoder
 
 
 class IMUManager:

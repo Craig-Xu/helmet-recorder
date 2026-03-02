@@ -117,7 +117,7 @@ def main() -> int:
         print('  3) 查看内核日志: dmesg | tail -n 50')
         return 1
 
-    print('\n完成。把上面输出的设备路径（如 /dev/ttyUSB0）填到 config.yaml 的 imu.port 即可。')
+    print('\n完成。把上面输出的设备路径（如 /dev/ttyUSB0）填到 config/config.yaml 的 imu.port 即可。')
     return 0
 
 

@@ -12,7 +12,7 @@ ArUco 相机标定与 TF 发布节点
   - N 帧缓冲 + 四元数平均 + tvec 中值滤波
 
 用法:
-    python3 scripts/ros2_camera_aruco_calib.py
+    python3 scripts/ros2_cam_aruco_calib.py
 """
 
 import rclpy
@@ -67,7 +67,9 @@ class CameraCalibrationNode(Node):
         super().__init__('camera_aruco_calib_node')
 
         # 1. 加载配置
-        config_path = _HERE / "config.yaml"
+        config_path = _HERE / "config" / "config.yaml"
+        if not config_path.exists():
+            config_path = _HERE / "config.yaml"
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
 

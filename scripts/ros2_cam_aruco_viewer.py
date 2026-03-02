@@ -19,7 +19,7 @@ import threading
 import yaml
 from pathlib import Path
 
-# ── 把项目根目录加入路径，以便读取 config.yaml ──
+# ── 把项目根目录加入路径，以便读取配置文件 ──
 _HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_HERE))
 
@@ -46,7 +46,9 @@ class MultiCameraVisualizer(Node):
         super().__init__('multi_camera_visualizer')
 
         # 加载配置
-        config_path = _HERE / "config.yaml"
+        config_path = _HERE / "config" / "config.yaml"
+        if not config_path.exists():
+            config_path = _HERE / "config.yaml"
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
 

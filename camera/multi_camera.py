@@ -155,7 +155,7 @@ def load_config(config_path=None):
     """
     if config_path is None:
         # 默认配置文件路径（脚本所在目录的上级目录）
-        config_path = Path(__file__).parent.parent / "config.yaml"
+        config_path = Path(__file__).parent.parent / "config" / "config.yaml"
     else:
         config_path = Path(config_path)
     
@@ -173,7 +173,7 @@ def load_config(config_path=None):
 def main():
     parser = argparse.ArgumentParser(description='多相机采集系统')
     parser.add_argument('--config', type=str, default=None,
-                       help='配置文件路径 (默认: ../config.yaml)')
+                       help='配置文件路径 (默认: ../config/config.yaml)')
     parser.add_argument('--ids', type=str, default=None,
                        help='相机ID列表，用逗号或空格分隔 (例如: "0,1,2,3")')
     parser.add_argument('--interactive', action='store_true',

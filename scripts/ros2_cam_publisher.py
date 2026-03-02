@@ -15,11 +15,11 @@ ROS2 多相机图像发布节点
     /helmet/cam{id}/image_raw   (sensor_msgs/msg/Image, encoding=bgr8)
 
 参数 (ROS2 params):
-    camera_ids  (list[int])  默认来自 config.yaml
+    camera_ids  (list[int])  默认来自 config/config.yaml
     width       (int)        默认 640
     height      (int)        默认 480
     fps         (int)        默认 30
-    config_path (str)        config.yaml 绝对路径，默认自动查找
+    config_path (str)        config/config.yaml 绝对路径，默认自动查找
 """
 
 import sys
@@ -28,7 +28,7 @@ import threading
 import time
 from pathlib import Path
 
-# ── 把项目根目录加入路径，以便读取 config.yaml ──
+# ── 把项目根目录加入路径，以便读取配置文件 ──
 _HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_HERE))
 
@@ -145,7 +145,7 @@ class CameraPublisherNode(Node):
     def __init__(self):
         super().__init__('helmet_camera_publisher')
 
-        # ── 读取 config.yaml ──
+        # ── 读取配置文件 ──
         config = self._load_config()
         cam_cfg = config.get('camera', {})
 
@@ -189,13 +189,15 @@ class CameraPublisherNode(Node):
     # ── 私有方法 ──
 
     def _load_config(self) -> dict:
-        config_path = _HERE / 'config.yaml'
+        config_path = _HERE / 'config' / 'config.yaml'
+        if not config_path.exists():
+            config_path = _HERE / 'config.yaml'
         if config_path.exists():
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     return yaml.safe_load(f) or {}
             except Exception as e:
-                self.get_logger().warn(f"config.yaml 读取失败: {e}")
+                self.get_logger().warn(f"配置文件读取失败 ({config_path}): {e}")
         return {}
 
     def _camera_loop(

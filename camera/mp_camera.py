@@ -6,10 +6,57 @@
 import cv2
 import numpy as np
 import time
+import os
 import multiprocessing as mp
 from multiprocessing import shared_memory
 from pathlib import Path
 from ctypes import c_uint64, c_double, c_bool
+
+
+def _open_camera_capture(camera_id: int, width: int, height: int, fps: int):
+    """
+    打开相机并按正确顺序设置格式。
+
+    关键：V4L2 必须在打开后「先设 FOURCC」，再设分辨率/FPS。
+    若先设分辨率，驱动会以默认格式(YUYV 15fps)初始化，后续 set() 无效。
+    """
+    backend = cv2.CAP_V4L2 if (os.name == 'posix' and hasattr(cv2, 'CAP_V4L2')) else cv2.CAP_ANY
+    cap = cv2.VideoCapture(camera_id, backend)
+    if not cap.isOpened():
+        # V4L2 失败时回退默认后端
+        cap = cv2.VideoCapture(camera_id)
+
+    if not cap.isOpened():
+        return cap
+
+    # 1. 先设 FOURCC（MJPG 压缩，USB 带宽从 ~150MB/s 降至 ~5MB/s）
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    # 2. 再设分辨率
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    # 3. 最后设 FPS（驱动需要知道分辨率才能协商帧率）
+    cap.set(cv2.CAP_PROP_FPS, fps)
+    # 4. 双缓冲：2 个 DMA 缓冲区
+    #    BUFFERSIZE=1 时只有 1 个缓冲区，app 读帧时相机无处写入，
+    #    造成每帧都要等 app 归还缓冲区，实际帧率砍半(30→15fps)。
+    #    BUFFERSIZE=2 实现双缓冲：相机填一个，app 同时读另一个。
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+
+    return cap
+
+
+def _log_camera_config(camera_id: int, cap):
+    """打印相机实际协商到的参数，便于排查帧率异常。"""
+    actual_w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc_str = ''.join(chr((fourcc_int >> (8 * i)) & 0xFF) for i in range(4))
+    backend   = cap.getBackendName()
+    print(
+        f"[Cam{camera_id}] 后端={backend}  格式={fourcc_str}  "
+        f"分辨率={actual_w}x{actual_h}  FPS={actual_fps:.1f}"
+    )
 
 
 def camera_worker_process(
@@ -48,22 +95,19 @@ def camera_worker_process(
     """
     
     try:
-        # 打开相机
-        cap = cv2.VideoCapture(camera_id)
+        # 打开相机（内部按顺序设置 FOURCC → 分辨率 → FPS）
+        cap = _open_camera_capture(camera_id, width, height, fps)
         if not cap.isOpened():
             error_msg.value = f"无法打开相机 {camera_id}".encode('utf-8')
             ready_event.set()
             return
         
-        # 配置相机 - MJPG格式减少USB带宽
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FPS, fps)
+        # 打印实际协商参数（若帧率仍显示 15，说明相机不支持 MJPG 高帧率）
+        _log_camera_config(camera_id, cap)
         
         # 读取第一帧验证相机工作
-        for _ in range(10):
+        ret = False
+        for _ in range(30):
             ret, frame = cap.read()
             if ret:
                 break
@@ -74,6 +118,13 @@ def camera_worker_process(
             cap.release()
             ready_event.set()
             return
+        
+        # 验证实际分辨率（set 不一定生效）
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if actual_w != width or actual_h != height:
+            print(f"[Cam{camera_id}] 警告: 请求 {width}x{height}, 实际 {actual_w}x{actual_h}")
+            width, height = actual_w, actual_h
         
         # 连接共享内存（用于预览帧传输）
         try:
@@ -87,11 +138,12 @@ def camera_worker_process(
         
         # 创建视频写入器
         output_file = Path(output_path) / f"{camera_id}.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        # Linux 多相机场景下 mp4v 通常编码更轻，先尝试 mp4v 再回退 avc1
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(str(output_file), fourcc, fps, (width, height), True)
         
         if not writer.isOpened():
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
             writer = cv2.VideoWriter(str(output_file), fourcc, fps, (width, height))
         
         if not writer.isOpened():
@@ -117,104 +169,70 @@ def camera_worker_process(
         if target_start > 0:
             wait_time = target_start - time.perf_counter()
             if wait_time > 0:
-                if wait_time > 0.002:
-                    time.sleep(wait_time - 0.001)
-                # 忙等待最后一点时间
-                while time.perf_counter() < target_start:
-                    pass
+                time.sleep(wait_time)
         
-        # 同步点：所有相机应该同时到达这里
+        # 清空相机双缓冲中的陈旧帧（等待期间积压的），丢弃 4 帧足够
+        for _ in range(4):
+            cap.grab()
+        
         # 初始化计数器
         frame_count = 0
         new_frames = 0
         duplicated = 0
-        dropped = 0
         preview_seq = 0
-        last_good_frame = None
         
-        # 立即抓取并处理第一帧（这是同步的关键帧）
-        ret = cap.grab()
-        if ret:
-            ret, first_frame = cap.retrieve()
-            if ret and first_frame is not None:
-                if first_frame.shape[1] != width or first_frame.shape[0] != height:
-                    first_frame = cv2.resize(first_frame, (width, height))
-                writer.write(first_frame)
-                np.copyto(preview_buffer, first_frame)
-                last_good_frame = first_frame
-                frame_count = 1
-                new_frames = 1
-                preview_seq = 1
-                stats_array[6] = preview_seq
-        
-        # 开始录制主循环
-        frame_interval = 1.0 / fps
         actual_start = time.perf_counter()
-        stats_array[4] = actual_start  # start_time
+        stats_array[4] = actual_start
         stats_array[5] = 1  # is_running = True
         
-        next_frame_time = actual_start + frame_interval  # 下一帧的目标时间
-        
+        # ================================================================
+        # 核心录制循环：由 cap.grab() 自然阻塞驱动帧率
+        #
+        # 【关键设计】cap.grab() 是阻塞式调用，它会等到相机硬件送出下一帧
+        # 才返回，天然决定了采集帧率。在其上再加 sleep 会造成双重等待，
+        # 导致实际帧率砍半（30fps → 15fps）。因此循环中不加任何 sleep。
+        # ================================================================
         while not stop_event.is_set():
-            current_time = time.perf_counter()
-            
-            # 精确帧率控制
-            if current_time < next_frame_time:
-                sleep_time = next_frame_time - current_time
-                if sleep_time > 0.001:
-                    time.sleep(sleep_time - 0.001)
-                # 忙等待最后1ms
-                while time.perf_counter() < next_frame_time:
-                    pass
-            
-            # 读取帧（非阻塞式grab + retrieve可以更好控制）
+            # grab() 阻塞等待硬件下一帧——这是帧率的唯一驱动者
             ret = cap.grab()
-            if ret:
-                ret, frame = cap.retrieve()
+            if not ret:
+                # 相机掉线或出错，短暂等待后重试
+                time.sleep(0.005)
+                continue
             
-            if ret and frame is not None:
-                # 确保分辨率匹配
-                if frame.shape[1] != width or frame.shape[0] != height:
-                    frame = cv2.resize(frame, (width, height))
-                
-                last_good_frame = frame
-                new_frames += 1
-                
-                # 写入视频
-                writer.write(frame)
-                frame_count += 1
-                
-                # 更新预览帧到共享内存（低频率更新，减少开销）
-                if frame_count % 3 == 0:  # 每3帧更新一次预览
-                    np.copyto(preview_buffer, frame)
-                    preview_seq += 1
-                    stats_array[6] = preview_seq
-                    
-            elif last_good_frame is not None:
-                # 相机没给新帧，复用上一帧
-                writer.write(last_good_frame)
-                frame_count += 1
-                duplicated += 1
-            else:
-                # 黑帧
-                black = np.zeros((height, width, 3), dtype=np.uint8)
-                writer.write(black)
-                frame_count += 1
-                dropped += 1
+            ret, frame = cap.retrieve()
+            if not ret or frame is None:
+                time.sleep(0.005)
+                continue
             
-            # 更新统计到共享内存
-            stats_array[0] = frame_count
-            stats_array[1] = new_frames
-            stats_array[2] = duplicated
-            stats_array[3] = dropped
+            # 确保分辨率匹配
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
             
-            next_frame_time += frame_interval
+            new_frames += 1
+            frame_count += 1
             
-            # 防止累积延迟（如果严重落后，重置时间）
-            if time.perf_counter() - next_frame_time > 0.5:
-                next_frame_time = time.perf_counter()
+            # 写入视频
+            writer.write(frame)
+            
+            # 更新预览帧（每3帧一次，减少共享内存开销）
+            if frame_count % 3 == 0:
+                np.copyto(preview_buffer, frame)
+                preview_seq += 1
+                stats_array[6] = preview_seq
+            
+            # 低频更新统计
+            if frame_count % 10 == 0:
+                stats_array[0] = frame_count
+                stats_array[1] = new_frames
+                stats_array[2] = 0  # 不再填充重复帧
+                stats_array[3] = 0
         
-        # 清理资源
+        # 清理资源：写入最终统计
+        stats_array[0] = frame_count
+        stats_array[1] = new_frames
+        stats_array[2] = 0
+        stats_array[3] = 0
         stats_array[5] = 0  # is_running = False
         writer.release()
         cap.release()
@@ -390,27 +408,23 @@ class MultiProcessCamera:
         try:
             frame_count = int(self.stats_array[0])
             new_frames = int(self.stats_array[1])
-            duplicated = int(self.stats_array[2])
-            dropped = int(self.stats_array[3])
             start_time = float(self.stats_array[4])
             is_running = bool(self.stats_array[5])
             
             if start_time > 0:
                 duration = time.perf_counter() - start_time
-                fps = frame_count / duration if duration > 0 else 0
                 hw_fps = new_frames / duration if duration > 0 else 0
             else:
                 duration = 0
-                fps = 0
                 hw_fps = 0
             
             return {
                 'frames': frame_count,
                 'new_frames': new_frames,
-                'duplicated': duplicated,
-                'dropped': dropped,
+                'duplicated': 0,
+                'dropped': 0,
                 'duration': duration,
-                'fps': fps,
+                'fps': hw_fps,
                 'hw_fps': hw_fps,
                 'is_running': is_running,
             }

@@ -205,12 +205,67 @@ class RecorderGUI:
         self.update_timer = None
         self.imu_flush_timer = None
         
+        # 应用深色主题
+        self._setup_theme()
+
         # 创建UI
         self.create_ui()
         
         # 初始化相机列表
         self.scan_cameras()
     
+    def _setup_theme(self):
+        """深色主题配色与 ttk 样式"""
+        self.C = {
+            'bg':         '#1a1a2e',
+            'sidebar':    '#151525',
+            'card':       '#1e2140',
+            'border':     '#2a2d4a',
+            'accent':     '#5b8dee',
+            'rec':        '#c94f4f',
+            'rec_hover':  '#e06060',
+            'stop':       '#3a9d5d',
+            'stop_hover': '#4ab56e',
+            'text':       '#dde1f0',
+            'text_dim':   '#5a6080',
+            'value':      '#7dd3fc',
+            'good':       '#86efac',
+            'warn':       '#fcd34d',
+            'input_bg':   '#10101e',
+            'input_fg':   '#c0c4e0',
+            'header_bg':  '#0d0d1e',
+            'section':    '#4f7fd4',
+        }
+        C = self.C
+        self.root.configure(bg=C['bg'])
+
+        style = ttk.Style()
+        try:
+            style.theme_use('clam')
+        except Exception:
+            pass
+
+        style.configure('D.TEntry',
+            fieldbackground=C['input_bg'], foreground=C['input_fg'],
+            bordercolor=C['border'], lightcolor=C['border'], darkcolor=C['border'],
+            insertcolor=C['text'], selectbackground=C['accent'], selectforeground='white',
+            padding=4,
+        )
+        style.map('D.TEntry',
+            fieldbackground=[('disabled', C['card'])],
+            foreground=[('disabled', C['text_dim'])],
+        )
+        style.configure('D.TSpinbox',
+            fieldbackground=C['input_bg'], foreground=C['input_fg'],
+            bordercolor=C['border'], lightcolor=C['border'], darkcolor=C['border'],
+            arrowcolor=C['text_dim'], insertcolor=C['text'],
+            padding=4,
+        )
+        style.map('D.TSpinbox',
+            fieldbackground=[('disabled', C['card'])],
+            foreground=[('disabled', C['text_dim'])],
+        )
+
     def load_config(self):
         """加载配置文件"""
         try:
@@ -223,188 +278,251 @@ class RecorderGUI:
         return {}
     
     def create_ui(self):
-        """创建用户界面"""
-        # 主容器
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # 配置网格权重
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(1, weight=1)
-        
-        # 标题
-        title_label = ttk.Label(
-            main_frame,
-            text="多相机+IMU数据采集系统",
-            font=('Arial', 16, 'bold')
+        """创建用户界面 - 深色主题"""
+        C = self.C
+
+        # 顶部标题栏
+        header = tk.Frame(self.root, bg=C['header_bg'], height=46)
+        header.pack(side=tk.TOP, fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(
+            header, text='  ⬛  HELMET RECORDER',
+            bg=C['header_bg'], fg=C['accent'],
+            font=('Arial', 12, 'bold'), anchor='w', padx=14,
+        ).pack(side=tk.LEFT, fill=tk.Y)
+
+        # 录制计时器（右上角）
+        self.record_time_var = tk.StringVar(value='00:00:00')
+        self._timer_label = tk.Label(
+            header, textvariable=self.record_time_var,
+            bg=C['header_bg'], fg=C['text_dim'],
+            font=('Courier', 15, 'bold'), padx=16,
         )
-        title_label.grid(row=0, column=0, columnspan=2, pady=10)
-        
-        # 左侧控制面板
-        self.create_control_panel(main_frame)
-        
-        # 右侧预览面板
-        self.create_preview_panel(main_frame)
-        
-        # 底部状态栏
-        self.create_status_bar(main_frame)
+        self._timer_label.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 底部状态栏（必须在 body 之前 pack 才能自动占据底部）
+        self.create_status_bar(self.root)
+
+        # 主区域
+        body = tk.Frame(self.root, bg=C['bg'])
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self.create_control_panel(body)
+        self.create_preview_panel(body)
     
     def create_control_panel(self, parent):
-        """创建控制面板"""
-        control_frame = ttk.LabelFrame(parent, text="控制面板", padding="10")
-        control_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
-        
-        row = 0
-        
-        # === 相机设置 ===
-        ttk.Label(control_frame, text="相机设置", font=('Arial', 12, 'bold')).grid(
-            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
-        )
-        row += 1
-        
-        # 相机ID列表
-        ttk.Label(control_frame, text="相机ID:").grid(row=row, column=0, sticky=tk.W)
+        """创建左侧控制面板 - 深色主题侧边栏"""
+        C = self.C
+        self._setting_widgets = []
+
+        sidebar = tk.Frame(parent, bg=C['sidebar'], width=286)
+        sidebar.grid(row=0, column=0, sticky='nsew')
+        sidebar.pack_propagate(False)
+        sidebar.grid_propagate(False)
+
+        def sec(icon, text):
+            f = tk.Frame(sidebar, bg=C['sidebar'])
+            f.pack(fill=tk.X, padx=14, pady=(14, 2))
+            tk.Label(f, text=f'{icon}  {text}', bg=C['sidebar'], fg=C['section'],
+                     font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
+            tk.Frame(f, bg=C['border'], height=1).pack(
+                side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0), pady=5)
+
+        def row(lbl, widget_fn):
+            f = tk.Frame(sidebar, bg=C['sidebar'])
+            f.pack(fill=tk.X, padx=14, pady=2)
+            tk.Label(f, text=lbl, bg=C['sidebar'], fg=C['text_dim'],
+                     font=('Arial', 9), width=8, anchor='w').pack(side=tk.LEFT)
+            w = widget_fn(f)
+            w.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            return w
+
+        # ── 相机配置 ──
+        sec('🎥', '相机配置')
         self.camera_ids_var = tk.StringVar(
             value=','.join(map(str, self.config.get('camera', {}).get('ids', [0])))
         )
-        camera_ids_entry = ttk.Entry(control_frame, textvariable=self.camera_ids_var, width=30)
-        camera_ids_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
-        row += 1
-        
-        # 扫描相机按钮
-        ttk.Button(control_frame, text="扫描可用相机", command=self.scan_cameras).grid(
-            row=row, column=0, columnspan=2, pady=5
+        w = row('Camera IDs', lambda f: ttk.Entry(f, textvariable=self.camera_ids_var, style='D.TEntry'))
+        self._setting_widgets.append(w)
+
+        scan_btn = tk.Button(
+            sidebar, text='↻  扫描可用相机',
+            bg=C['card'], fg=C['accent'],
+            activebackground=C['border'], activeforeground=C['accent'],
+            relief=tk.FLAT, cursor='hand2', pady=5, font=('Arial', 9),
+            command=self.scan_cameras,
         )
-        row += 1
-        
-        # 相机分辨率
-        ttk.Label(control_frame, text="分辨率:").grid(row=row, column=0, sticky=tk.W)
-        resolution_frame = ttk.Frame(control_frame)
-        resolution_frame.grid(row=row, column=1, sticky=(tk.W, tk.E))
-        
-        self.width_var = tk.IntVar(value=self.config.get('camera', {}).get('width', 640))
+        scan_btn.pack(fill=tk.X, padx=14, pady=(2, 6))
+        self._setting_widgets.append(scan_btn)
+
+        self.width_var  = tk.IntVar(value=self.config.get('camera', {}).get('width', 640))
         self.height_var = tk.IntVar(value=self.config.get('camera', {}).get('height', 480))
-        
-        ttk.Entry(resolution_frame, textvariable=self.width_var, width=8).pack(side=tk.LEFT)
-        ttk.Label(resolution_frame, text=" x ").pack(side=tk.LEFT)
-        ttk.Entry(resolution_frame, textvariable=self.height_var, width=8).pack(side=tk.LEFT)
-        row += 1
-        
-        # 帧率
-        ttk.Label(control_frame, text="录制帧率:").grid(row=row, column=0, sticky=tk.W)
+        res_f = tk.Frame(sidebar, bg=C['sidebar'])
+        res_f.pack(fill=tk.X, padx=14, pady=2)
+        tk.Label(res_f, text='分辨率', bg=C['sidebar'], fg=C['text_dim'],
+                 font=('Arial', 9), width=8, anchor='w').pack(side=tk.LEFT)
+        we = ttk.Entry(res_f, textvariable=self.width_var, style='D.TEntry', width=7)
+        we.pack(side=tk.LEFT)
+        tk.Label(res_f, text=' × ', bg=C['sidebar'], fg=C['text_dim'],
+                 font=('Arial', 9)).pack(side=tk.LEFT)
+        he = ttk.Entry(res_f, textvariable=self.height_var, style='D.TEntry', width=7)
+        he.pack(side=tk.LEFT)
+        self._setting_widgets += [we, he]
+
         self.fps_var = tk.IntVar(value=30)
-        fps_spinbox = ttk.Spinbox(control_frame, from_=1, to=60, textvariable=self.fps_var, width=28)
-        fps_spinbox.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
-        row += 1
-        
-        # === IMU设置 ===
-        ttk.Separator(control_frame, orient=tk.HORIZONTAL).grid(
-            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15
-        )
-        row += 1
-        
-        ttk.Label(control_frame, text="IMU设置", font=('Arial', 12, 'bold')).grid(
-            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
-        )
-        row += 1
-        
-        # IMU串口
-        ttk.Label(control_frame, text="串口:").grid(row=row, column=0, sticky=tk.W)
+        fps_s = row('帧率 fps', lambda f: ttk.Spinbox(
+            f, from_=1, to=120, textvariable=self.fps_var,
+            style='D.TSpinbox', width=8,
+        ))
+        self._setting_widgets.append(fps_s)
+
+        # ── IMU 配置 ──
+        sec('📡', 'IMU 配置')
         self.imu_port_var = tk.StringVar(
-            value=self.config.get('imu', {}).get('port', '/dev/tty.usbserial-5B0B0295361')
+            value=self.config.get('imu', {}).get('port', '/dev/ttyUSB0')
         )
-        imu_port_entry = ttk.Entry(control_frame, textvariable=self.imu_port_var, width=30)
-        imu_port_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
-        row += 1
-        
-        # IMU波特率
-        ttk.Label(control_frame, text="波特率:").grid(row=row, column=0, sticky=tk.W)
+        w = row('串口', lambda f: ttk.Entry(f, textvariable=self.imu_port_var, style='D.TEntry'))
+        self._setting_widgets.append(w)
+
         self.imu_baud_var = tk.IntVar(value=self.config.get('imu', {}).get('bps', 460800))
-        imu_baud_entry = ttk.Entry(control_frame, textvariable=self.imu_baud_var, width=30)
-        imu_baud_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
-        row += 1
-        
-        # === 输出设置 ===
-        ttk.Separator(control_frame, orient=tk.HORIZONTAL).grid(
-            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15
-        )
-        row += 1
-        
-        ttk.Label(control_frame, text="输出设置", font=('Arial', 12, 'bold')).grid(
-            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
-        )
-        row += 1
-        
-        # 输出目录
-        ttk.Label(control_frame, text="输出目录:").grid(row=row, column=0, sticky=tk.W)
+        w = row('波特率', lambda f: ttk.Entry(f, textvariable=self.imu_baud_var, style='D.TEntry'))
+        self._setting_widgets.append(w)
+
+        # ── 输出路径 ──
+        sec('💾', '输出路径')
         self.output_dir_var = tk.StringVar(value=str(self.output_dir))
-        ttk.Entry(control_frame, textvariable=self.output_dir_var, width=30, state='readonly').grid(
-            row=row, column=1, sticky=(tk.W, tk.E), pady=5
+        dir_lbl = tk.Label(
+            sidebar, textvariable=self.output_dir_var,
+            bg=C['input_bg'], fg=C['text_dim'], font=('Arial', 8),
+            anchor='w', padx=8, pady=5, relief=tk.FLAT,
         )
-        row += 1
-        
-        ttk.Button(control_frame, text="选择输出目录", command=self.select_output_dir).grid(
-            row=row, column=0, columnspan=2, pady=5
+        dir_lbl.pack(fill=tk.X, padx=14, pady=2)
+        browse_btn = tk.Button(
+            sidebar, text='📁  选择目录',
+            bg=C['card'], fg=C['text_dim'],
+            activebackground=C['border'], activeforeground=C['text'],
+            relief=tk.FLAT, cursor='hand2', pady=5, font=('Arial', 9),
+            command=self.select_output_dir,
         )
-        row += 1
-        
-        # === 录制控制 ===
-        ttk.Separator(control_frame, orient=tk.HORIZONTAL).grid(
-            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15
-        )
-        row += 1
-        
-        # 录制按钮
-        self.record_button = ttk.Button(
-            control_frame,
-            text="开始录制",
+        browse_btn.pack(fill=tk.X, padx=14, pady=(2, 12))
+        self._setting_widgets.append(browse_btn)
+
+        # ── 录制按钮 ──
+        tk.Frame(sidebar, bg=C['border'], height=1).pack(fill=tk.X, padx=14, pady=(4, 12))
+        self.record_button = tk.Button(
+            sidebar,
+            text='●  开始录制',
             command=self.toggle_recording,
-            style='Record.TButton'
+            bg=C['rec'], fg='white',
+            activebackground=C['rec_hover'], activeforeground='white',
+            font=('Arial', 13, 'bold'), relief=tk.FLAT, cursor='hand2', pady=13,
         )
-        self.record_button.grid(row=row, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E))
-        
-        # 配置录制按钮样式
-        style = ttk.Style()
-        style.configure('Record.TButton', font=('Arial', 14, 'bold'))
-        
-        control_frame.columnconfigure(1, weight=1)
+        self.record_button.pack(fill=tk.X, padx=14, pady=(0, 16))
     
     def create_preview_panel(self, parent):
-        """创建预览面板"""
-        preview_frame = ttk.LabelFrame(parent, text="相机预览", padding="10")
-        preview_frame.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # 创建Canvas用于显示视频
-        self.preview_canvas = tk.Canvas(preview_frame, bg='black')
+        """创建右侧预览面板 - 深色主题"""
+        C = self.C
+        right = tk.Frame(parent, bg=C['bg'])
+        right.grid(row=0, column=1, sticky='nsew')
+        right.rowconfigure(0, weight=3)
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+
+        # ── 预览画布 ──
+        canvas_wrap = tk.Frame(right, bg=C['card'], padx=2, pady=2)
+        canvas_wrap.grid(row=0, column=0, sticky='nsew', padx=8, pady=(8, 4))
+        self.preview_canvas = tk.Canvas(canvas_wrap, bg='#06060f', highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
-        
-        # IMU数据显示
-        imu_frame = ttk.LabelFrame(preview_frame, text="IMU数据", padding="5")
-        imu_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        self.imu_text = tk.Text(imu_frame, height=6, state='disabled', font=('Courier', 9))
-        self.imu_text.pack(fill=tk.BOTH, expand=True)
+
+        # ── IMU 数据面板 ──
+        imu_card = tk.Frame(right, bg=C['card'])
+        imu_card.grid(row=1, column=0, sticky='nsew', padx=8, pady=(4, 8))
+
+        hdr = tk.Frame(imu_card, bg=C['card'])
+        hdr.pack(fill=tk.X, padx=12, pady=(7, 0))
+        tk.Label(hdr, text='📡  IMU 实时数据',
+                 bg=C['card'], fg=C['text_dim'], font=('Arial', 9, 'bold')).pack(side=tk.LEFT)
+        tk.Frame(imu_card, bg=C['border'], height=1).pack(fill=tk.X, padx=12, pady=(4, 0))
+
+        # 数值网格：3列（姿态角 / 加速度 / 角速度）
+        grid_f = tk.Frame(imu_card, bg=C['card'])
+        grid_f.pack(fill=tk.X, padx=12, pady=4)
+        for c in range(3):
+            grid_f.columnconfigure(c, weight=1)
+
+        groups = [
+            ('姿态角', [('Roll',   'roll'),   ('Pitch', 'pitch'), ('Yaw',    'yaw')],    C['value']),
+            ('加速度', [('Acc X',  'acc_x'),  ('Acc Y', 'acc_y'),  ('Acc Z',  'acc_z')],  C['good']),
+            ('角速度', [('Gyro X', 'gyro_x'), ('Gyro Y','gyro_y'), ('Gyro Z', 'gyro_z')], C['warn']),
+        ]
+        self._imu_val_labels = {}
+        for col, (group_title, fields, val_color) in enumerate(groups):
+            gcol = tk.Frame(grid_f, bg=C['card'])
+            gcol.grid(row=0, column=col, sticky='nsew', padx=4)
+            tk.Label(gcol, text=group_title, bg=C['card'], fg=C['text_dim'],
+                     font=('Arial', 8, 'bold'), anchor='w').pack(fill=tk.X, pady=(0, 3))
+            for lbl_text, key in fields:
+                rf = tk.Frame(gcol, bg=C['input_bg'])
+                rf.pack(fill=tk.X, pady=1)
+                tk.Label(rf, text=lbl_text, bg=C['input_bg'], fg=C['text_dim'],
+                         font=('Arial', 8), anchor='w', width=7, padx=4).pack(side=tk.LEFT)
+                val_lbl = tk.Label(rf, text='—', bg=C['input_bg'], fg=val_color,
+                                   font=('Courier', 9, 'bold'), anchor='e', padx=4)
+                val_lbl.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+                self._imu_val_labels[key] = val_lbl
+
+        # 底部：磁力计 + 温度 + 数据包
+        tk.Frame(imu_card, bg=C['border'], height=1).pack(fill=tk.X, padx=12, pady=(4, 0))
+        bot = tk.Frame(imu_card, bg=C['card'])
+        bot.pack(fill=tk.X, padx=12, pady=(4, 7))
+
+        for lbl_text, key in [('Mag X', 'norm_mag_x'), ('Mag Y', 'norm_mag_y'), ('Mag Z', 'norm_mag_z')]:
+            cell = tk.Frame(bot, bg=C['input_bg'])
+            cell.pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(cell, text=lbl_text, bg=C['input_bg'], fg=C['text_dim'],
+                     font=('Arial', 8), padx=4).pack(side=tk.LEFT)
+            val_lbl = tk.Label(cell, text='—', bg=C['input_bg'], fg=C['accent'],
+                               font=('Courier', 9, 'bold'), padx=4)
+            val_lbl.pack(side=tk.LEFT)
+            self._imu_val_labels[key] = val_lbl
+
+        temp_cell = tk.Frame(bot, bg=C['input_bg'])
+        temp_cell.pack(side=tk.LEFT, padx=(8, 4))
+        tk.Label(temp_cell, text='温度', bg=C['input_bg'], fg=C['text_dim'],
+                 font=('Arial', 8), padx=4).pack(side=tk.LEFT)
+        self._imu_temp_lbl = tk.Label(temp_cell, text='—', bg=C['input_bg'], fg=C['warn'],
+                                      font=('Courier', 9, 'bold'), padx=4)
+        self._imu_temp_lbl.pack(side=tk.LEFT)
+
+        pkt_cell = tk.Frame(bot, bg=C['input_bg'])
+        pkt_cell.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(pkt_cell, text='数据包', bg=C['input_bg'], fg=C['text_dim'],
+                 font=('Arial', 8), padx=4).pack(side=tk.LEFT)
+        self._imu_pkt_lbl = tk.Label(pkt_cell, text='0', bg=C['input_bg'], fg=C['good'],
+                                     font=('Courier', 9, 'bold'), padx=4)
+        self._imu_pkt_lbl.pack(side=tk.LEFT)
     
     def create_status_bar(self, parent):
-        """创建状态栏"""
-        status_frame = ttk.Frame(parent)
-        status_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
-        
-        self.status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(status_frame, textvariable=self.status_var, relief=tk.SUNKEN)
-        status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # 录制时间显示
-        self.record_time_var = tk.StringVar(value="00:00:00")
-        time_label = ttk.Label(
-            status_frame,
-            textvariable=self.record_time_var,
-            relief=tk.SUNKEN,
-            font=('Arial', 10, 'bold')
+        """创建底部状态栏 - 深色主题"""
+        C = self.C
+        bar = tk.Frame(parent, bg=C['header_bg'], height=26)
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        bar.pack_propagate(False)
+
+        self._status_dot = tk.Label(
+            bar, text='⬤', bg=C['header_bg'], fg=C['good'],
+            font=('Arial', 7), padx=8,
         )
-        time_label.pack(side=tk.RIGHT, padx=(10, 0))
+        self._status_dot.pack(side=tk.LEFT)
+
+        self.status_var = tk.StringVar(value='就绪')
+        tk.Label(
+            bar, textvariable=self.status_var,
+            bg=C['header_bg'], fg=C['text_dim'],
+            font=('Arial', 9), anchor='w',
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
     
     def scan_cameras(self):
         """扫描可用相机"""
@@ -504,65 +622,66 @@ class RecorderGUI:
             self.cleanup_recording()
     
     def _show_countdown_and_start(self):
-        """显示倒计时弹窗并同步启动所有相机"""
-        # 创建倒计时弹窗
+        """显示深色主题倒计时弹窗并同步启动所有相机"""
+        C = self.C
         countdown_window = tk.Toplevel(self.root)
         countdown_window.title("准备录制")
         countdown_window.geometry("300x200")
         countdown_window.resizable(False, False)
         countdown_window.transient(self.root)
         countdown_window.grab_set()
-        
+        countdown_window.configure(bg=C['card'])
+
         # 居中显示
         countdown_window.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - 300) // 2
         y = self.root.winfo_y() + (self.root.winfo_height() - 200) // 2
         countdown_window.geometry(f"+{x}+{y}")
-        
-        # 标题
-        ttk.Label(
-            countdown_window, 
-            text="相机同步中...", 
-            font=('Arial', 12)
+
+        tk.Label(
+            countdown_window, text="相机同步中...",
+            bg=C['card'], fg=C['text_dim'], font=('Arial', 12),
         ).pack(pady=10)
-        
-        # 倒计时数字
+
         countdown_var = tk.StringVar(value="3")
-        countdown_label = ttk.Label(
-            countdown_window, 
-            textvariable=countdown_var, 
+        tk.Label(
+            countdown_window, textvariable=countdown_var,
+            bg=C['card'], fg=C['accent'],
             font=('Arial', 72, 'bold'),
-            foreground='#2196F3'
-        )
-        countdown_label.pack(pady=10)
-        
-        # 状态提示
+        ).pack(pady=4)
+
         status_var = tk.StringVar(value="准备同步所有相机...")
-        ttk.Label(countdown_window, textvariable=status_var).pack(pady=10)
-        
-        # 倒计时逻辑
+        tk.Label(
+            countdown_window, textvariable=status_var,
+            bg=C['card'], fg=C['text_dim'], font=('Arial', 9),
+        ).pack(pady=8)
+
         def do_countdown(count):
             if count > 0:
                 countdown_var.set(str(count))
-                status_var.set(f"即将开始录制...")
+                status_var.set("即将开始录制...")
                 countdown_window.after(1000, lambda: do_countdown(count - 1))
             else:
                 countdown_var.set("GO!")
                 status_var.set("同步启动所有相机!")
                 countdown_window.after(300, finish_countdown)
-        
+
         def finish_countdown():
             countdown_window.destroy()
             self._finalize_recording_start()
-        
-        # 开始倒计时
+
         countdown_window.after(100, lambda: do_countdown(3))
     
     def _finalize_recording_start(self):
         """完成录制启动（倒计时结束后）"""
         # 更新UI
         self.is_recording = True
-        self.record_button.config(text="停止录制 ⏹")
+        self.record_button.config(
+            text='■  停止录制',
+            bg=self.C['stop'], activebackground=self.C['stop_hover'],
+        )
+        self._timer_label.config(fg=self.C['rec'])
+        self._status_dot.config(fg=self.C['rec'])
         self.status_var.set(f"正在录制到: {self.current_session_dir.name}")
         
         # 重置 IMU 起始时间（与相机同步）
@@ -712,21 +831,29 @@ class RecorderGUI:
         """更新IMU数据显示"""
         if not self.imu_recorder:
             return
-        
         data = self.imu_recorder.get_latest_data()
-        if data:
-            text = (
-                f"姿态角: Roll={data['roll']:7.2f}° Pitch={data['pitch']:7.2f}° Yaw={data['yaw']:7.2f}°\n"
-                f"加速度: X={data['acc_x']:7.3f}g Y={data['acc_y']:7.3f}g Z={data['acc_z']:7.3f}g\n"
-                f"角速度: X={data['gyro_x']:7.2f}°/s Y={data['gyro_y']:7.2f}°/s Z={data['gyro_z']:7.2f}°/s\n"
-                f"磁力计: X={data['norm_mag_x']:7.3f} Y={data['norm_mag_y']:7.3f} Z={data['norm_mag_z']:7.3f}\n"
-                f"温度: {data['sensor_temp']:.1f}°C | 数据包: {self.imu_recorder.data_count}"
-            )
-            
-            self.imu_text.config(state='normal')
-            self.imu_text.delete('1.0', tk.END)
-            self.imu_text.insert('1.0', text)
-            self.imu_text.config(state='disabled')
+        if not data:
+            return
+
+        fmts = {
+            'roll':      lambda v: f'{v:+8.2f}°',
+            'pitch':     lambda v: f'{v:+8.2f}°',
+            'yaw':       lambda v: f'{v:+8.2f}°',
+            'acc_x':     lambda v: f'{v:+7.3f}g',
+            'acc_y':     lambda v: f'{v:+7.3f}g',
+            'acc_z':     lambda v: f'{v:+7.3f}g',
+            'gyro_x':    lambda v: f'{v:+7.2f}°/s',
+            'gyro_y':    lambda v: f'{v:+7.2f}°/s',
+            'gyro_z':    lambda v: f'{v:+7.2f}°/s',
+            'norm_mag_x': lambda v: f'{v:+7.3f}',
+            'norm_mag_y': lambda v: f'{v:+7.3f}',
+            'norm_mag_z': lambda v: f'{v:+7.3f}',
+        }
+        for key, lbl in self._imu_val_labels.items():
+            if key in data and key in fmts:
+                lbl.config(text=fmts[key](data[key]))
+        self._imu_temp_lbl.config(text=f"{data.get('sensor_temp', 0):.1f} °C")
+        self._imu_pkt_lbl.config(text=str(self.imu_recorder.data_count))
     
     def stop_recording(self):
         """停止录制 - 多进程架构"""
@@ -780,7 +907,12 @@ class RecorderGUI:
         self.cleanup_recording()
         
         # 更新UI
-        self.record_button.config(text="开始录制")
+        self.record_button.config(
+            text='●  开始录制',
+            bg=self.C['rec'], activebackground=self.C['rec_hover'],
+        )
+        self._timer_label.config(fg=self.C['text_dim'])
+        self._status_dot.config(fg=self.C['good'])
         self.status_var.set(f"录制完成: {saved_dir}")
         self.record_time_var.set("00:00:00")
         
@@ -840,8 +972,12 @@ class RecorderGUI:
     
     def set_controls_state(self, state):
         """设置控件启用/禁用状态"""
-        # 这里可以添加更多需要禁用的控件
-        pass
+        tk_state = 'disabled' if state == 'disabled' else 'normal'
+        for w in getattr(self, '_setting_widgets', []):
+            try:
+                w.config(state=tk_state)
+            except Exception:
+                pass
     
     def on_closing(self):
         """窗口关闭事件"""

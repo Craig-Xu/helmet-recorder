@@ -4,6 +4,8 @@ import threading
 import time
 import argparse
 import yaml
+import os
+import re
 from pathlib import Path
 
 class CameraStream:
@@ -68,23 +70,84 @@ class CameraStream:
             self.thread.join(timeout=1.0)
         self.cap.release()
 
+def _parse_video_index(device_path: Path):
+    """从 /dev/videoX 路径中解析索引 X。"""
+    match = re.fullmatch(r"video(\d+)", device_path.name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _try_open_camera(source, backends):
+    """尝试使用多个后端打开相机，返回 (is_opened, backend_name)。"""
+    for backend in backends:
+        cap = None
+        try:
+            if backend is None:
+                cap = cv2.VideoCapture(source)
+            else:
+                cap = cv2.VideoCapture(source, backend)
+
+            if cap.isOpened():
+                backend_name = cap.getBackendName()
+                ret, _ = cap.read()
+                if ret:
+                    return True, backend_name
+        except Exception:
+            pass
+        finally:
+            if cap is not None:
+                cap.release()
+
+    return False, None
+
+
 def list_cameras(max_to_test=10):
     """
     列出所有可用的摄像头 ID 并排序
+
+    Linux: 优先扫描 /dev/video* 并使用 V4L2 后端，避免默认后端导致漏检。
+    其他平台: 回退到索引扫描。
     """
-    available_cameras = []
+    available_cameras = set()
     print("正在扫描摄像头...")
-    for i in range(max_to_test):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            # 获取后端名称协助识别
-            backend_name = cap.getBackendName()
-            available_cameras.append(i)
-            print(f"找到摄像头 ID: {i} ({backend_name})")
-            cap.release()
-    
-    available_cameras.sort()
-    return available_cameras
+
+    preferred_backends = []
+    if hasattr(cv2, 'CAP_V4L2'):
+        preferred_backends.append(cv2.CAP_V4L2)
+    preferred_backends.append(None)  # 默认后端回退
+
+    if os.name == 'posix' and Path('/dev').exists():
+        video_devices = sorted(
+            Path('/dev').glob('video*'),
+            key=lambda p: (_parse_video_index(p) is None, _parse_video_index(p) or 10**9)
+        )
+
+        for dev in video_devices:
+            idx = _parse_video_index(dev)
+            if idx is None:
+                continue
+
+            ok, backend_name = _try_open_camera(str(dev), preferred_backends)
+            if ok:
+                available_cameras.add(idx)
+                print(f"找到摄像头 ID: {idx} ({backend_name}, {dev})")
+
+        # Linux 下如果 /dev 扫描没有结果，回退到索引扫描
+        if not available_cameras:
+            for i in range(max_to_test):
+                ok, backend_name = _try_open_camera(i, preferred_backends)
+                if ok:
+                    available_cameras.add(i)
+                    print(f"找到摄像头 ID: {i} ({backend_name})")
+    else:
+        for i in range(max_to_test):
+            ok, backend_name = _try_open_camera(i, preferred_backends)
+            if ok:
+                available_cameras.add(i)
+                print(f"找到摄像头 ID: {i} ({backend_name})")
+
+    return sorted(available_cameras)
 
 def load_config(config_path=None):
     """

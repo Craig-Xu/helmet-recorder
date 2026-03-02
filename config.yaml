@@ -2,14 +2,14 @@
 
 # IMU 配置
 imu:
-  port: /dev/tty.usbserial-5B0B0295361
+  port: /dev/ttyACM0 
   bps: 460800
 
 # 相机配置
 camera:
   # 要使用的相机 ID 列表
   # 例如: [0, 1, 2, 3, 4, 5, 6, 7]
-  ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  ids: [0, 2, 4, 6, 8 , 10, 12, 14]
   
   # 相机分辨率
   width: 640

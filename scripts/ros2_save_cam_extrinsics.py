@@ -3,7 +3,11 @@
 ros2_save_cam_extrinsics.py
 ───────────────────────────
 收集 ArUco 标定节点发布的 TF (marker_0 → cam{v4l2_id})，
-取若干帧平均后，将所有相机外参写入 config.yaml。
+取若干帧平均后，以 cam3 为基准（主摄像头），将所有相机的
+**相对外参**写入 config.yaml。
+
+cam3 的外参为单位变换 (identity)，其余相机外参表示各自
+相对于 cam3 坐标系的位姿变换。
 
 前提条件:
   - ros2_camera_publisher.py   已在运行（发布图像）
@@ -16,8 +20,8 @@ ros2_save_cam_extrinsics.py
 成功后会在 config.yaml 的 camera.extrinsics 节点下写入：
     cam{v4l2_id}:
       physical_id: {物理编号}
-      translation: [tx, ty, tz]          # 米
-      rotation:    [qx, qy, qz, qw]
+      translation: [tx, ty, tz]          # 米, 相对于 cam3
+      rotation:    [qx, qy, qz, qw]     # 相对于 cam3
 """
 
 import sys
@@ -46,7 +50,8 @@ INDEX_AXIS      = 0      # 0:x, 1:y, 2:z
 INDEX_DESC      = False  # False: x 从小到大 -> physical_id/cam_id 从 0 到 N-1
 MIDDLE_COUNT    = 4      # 中间相机数量
 MIDDLE_Z_ASC    = True   # 中间 4 个按 z 从小到大
-SWAP_CAM_4_5    = True   # 业务修正：交换 cam4 / cam5 顺序
+SWAP_PAIRS      = [(2, 3), (4, 5)]   # 业务修正：排序后交换这些 cam 对
+REF_CAM_ID      = 3      # 主摄像头编号（新编号），所有外参以此相机为基准
 
 
 def quat_mean(quats: np.ndarray) -> np.ndarray:
@@ -74,6 +79,44 @@ def _resolve_cam_to_video(camera_ids: list[int], raw_index_map: dict) -> dict[in
     if keys.issubset(id_set):
         return {cam: vid for vid, cam in raw.items() if vid in id_set}
     return {cam: vid for cam, vid in raw.items()}
+
+
+def _rebase_extrinsics(results: dict, ref_cam_name: str, logger=None) -> dict:
+    """
+    将所有外参从 marker_0 坐标系转换为 ref_cam 坐标系。
+    ref_cam 的外参变为 identity (t=[0,0,0], q=[0,0,0,1])。
+
+    数学：T_{ref←X} = T_{marker←ref}^{-1} · T_{marker←X}
+          R_rel = R_ref^{-1} · R_X
+          t_rel = R_ref^{-1} · (t_X - t_ref)
+    """
+    if ref_cam_name not in results:
+        if logger:
+            logger.warn(f'参考相机 {ref_cam_name} 未在标定结果中，跳过 rebase')
+        return results
+
+    ref = results[ref_cam_name]
+    R_ref = Rotation.from_quat(ref['rotation'])
+    t_ref = np.array(ref['translation'])
+    R_ref_inv = R_ref.inv()
+
+    rebased = {}
+    for cam_name, item in results.items():
+        R_cam = Rotation.from_quat(item['rotation'])
+        t_cam = np.array(item['translation'])
+
+        R_rel = R_ref_inv * R_cam
+        t_rel = R_ref_inv.apply(t_cam - t_ref)
+
+        rebased[cam_name] = {
+            **item,
+            'translation': [round(float(v), 6) for v in t_rel],
+            'rotation':    [round(float(v), 8) for v in R_rel.as_quat()],
+        }
+
+    if logger:
+        logger.info(f'所有外参已转换为相对于 {ref_cam_name} 的坐标系')
+    return rebased
 
 
 def build_index_map_from_extrinsics(results: dict, cam_to_video: dict, axis: int = INDEX_AXIS, desc: bool = INDEX_DESC) -> dict:
@@ -105,9 +148,10 @@ def build_index_map_from_extrinsics(results: dict, cam_to_video: dict, axis: int
 
     index_map = {idx: int(video_id) for idx, (_, _, _, video_id) in enumerate(sortable)}
 
-    # 业务修正：仅交换 cam4 与 cam5，其它顺序保持不变
-    if SWAP_CAM_4_5 and 4 in index_map and 5 in index_map:
-        index_map[4], index_map[5] = index_map[5], index_map[4]
+    # 业务修正：交换指定 cam 对
+    for a, b in SWAP_PAIRS:
+        if a in index_map and b in index_map:
+            index_map[a], index_map[b] = index_map[b], index_map[a]
 
     return index_map
 
@@ -200,7 +244,8 @@ class ExtrinsicsSaver(Node):
                 f'q=[{quat[0]:.4f}, {quat[1]:.4f}, {quat[2]:.4f}, {quat[3]:.4f}]'
             )
 
-        # 基于外参自动重建 index_map(cam->video)，并回填 physical_id
+        # 基于外参（marker坐标系）自动重建 index_map(cam->video)，并回填 physical_id
+        # 注意：排序使用 marker 坐标系下的原始外参，保证 x 轴排序正确
         new_index_map = build_index_map_from_extrinsics(results, self.cam_to_video)
         old_cam_to_new_cam = {}
         for new_cam, video_id in new_index_map.items():
@@ -218,6 +263,28 @@ class ExtrinsicsSaver(Node):
             self.get_logger().info('根据 extrinsics 自动更新 index_map:')
             for cam_id, video_id in sorted(new_index_map.items(), key=lambda kv: kv[0]):
                 self.get_logger().info(f'  /helmet/cam{cam_id} <- /dev/video{video_id}')
+
+        # ── 以主摄像头 (cam REF_CAM_ID) 为基准，转换所有外参 ──
+        # 找到新编号 REF_CAM_ID 对应的旧 cam 名称
+        ref_video = new_index_map.get(REF_CAM_ID)
+        ref_old_cam_name = None
+        if ref_video is not None:
+            for old_cam, old_video in self.cam_to_video.items():
+                if int(old_video) == int(ref_video):
+                    ref_old_cam_name = f'cam{old_cam}'
+                    break
+
+        if ref_old_cam_name and ref_old_cam_name in results:
+            self.get_logger().info(
+                f'以 {ref_old_cam_name} (新编号 cam{REF_CAM_ID}) 为基准，'
+                f'转换所有外参为相对坐标系'
+            )
+            results = _rebase_extrinsics(results, ref_old_cam_name, self.get_logger())
+        else:
+            self.get_logger().warn(
+                f'主摄像头 cam{REF_CAM_ID} 未找到标定结果，'
+                f'外参保持 marker_0 坐标系'
+            )
 
         # 写回 config.yaml
         with open(CONFIG_PATH, 'r') as f:

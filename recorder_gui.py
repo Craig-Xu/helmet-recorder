@@ -22,6 +22,7 @@ import yaml
 import sys
 import os
 import multiprocessing as mp
+from PIL import Image, ImageTk
 
 # 添加imu和camera模块路径
 sys.path.insert(0, str(Path(__file__).parent / 'imu'))
@@ -205,6 +206,7 @@ class RecorderGUI:
         # 定时器
         self.update_timer = None
         self.imu_flush_timer = None
+        self.preview_interval_ms = 120  # 约 8fps 预览，比原 3fps 更流畅
         
         # 应用深色主题
         self._setup_theme()
@@ -782,8 +784,8 @@ class RecorderGUI:
         if self.imu_recorder:
             self.update_imu_display()
         
-        # 每333ms更新一次（3fps预览，大幅减少UI负担）
-        self.update_timer = self.root.after(333, self.schedule_update)
+        # 约 8fps 预览：更流畅，同时避免 UI 线程过载
+        self.update_timer = self.root.after(self.preview_interval_ms, self.schedule_update)
     
     def update_preview(self):
         """更新相机预览 - 从多进程共享内存读取，显示所有相机网格"""
@@ -798,58 +800,75 @@ class RecorderGUI:
             if not preview_frames:
                 return
             
-            frames = []
             num_cams = len(self.camera_ids)
-            
-            for cam_id in self.camera_ids:
+
+            # 固定缩略图尺寸：画面更清晰，标签更易读
+            if num_cams >= 8:
+                thumb_size = (240, 135)  # 降低拼接分辨率，减轻 UI 压力
+                font_scale = 0.48
+            elif num_cams <= 2:
+                thumb_size = (360, 240)
+                font_scale = 0.6
+            else:
+                thumb_size = (280, 180)
+                font_scale = 0.55
+
+            def build_tile(cam_id):
                 frame = preview_frames.get(cam_id)
                 stats = all_stats.get(cam_id)
-                
-                if frame is not None:
-                    # 根据相机数量决定缩略图大小
-                    if num_cams <= 2:
-                        thumb_size = (320, 240)
-                    elif num_cams <= 4:
-                        thumb_size = (240, 180)
-                    else:
-                        thumb_size = (160, 120)
-                    
-                    small = cv2.resize(frame, thumb_size, interpolation=cv2.INTER_NEAREST)
-                    
-                    # 添加相机ID和帧数标签
+
+                if frame is None:
+                    tile = np.zeros((thumb_size[1], thumb_size[0], 3), dtype=np.uint8)
+                    cv2.putText(tile, self._format_cam_label(cam_id), (8, 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (120, 220, 255), 1)
+                    cv2.putText(tile, "NO SIGNAL", (8, thumb_size[1] // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 220), 2)
+                else:
+                    tile = cv2.resize(frame, thumb_size, interpolation=cv2.INTER_LINEAR)
+
+                    # 顶部信息条（更美观）
+                    cv2.rectangle(tile, (0, 0), (thumb_size[0], 26), (18, 18, 28), -1)
                     label = self._format_cam_label(cam_id)
                     if stats:
-                        label += f" {stats['frames']}f {stats['hw_fps']:.0f}fps"
-                    cv2.putText(small, label, (4, 16),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                    frames.append(small)
-            
-            if not frames:
-                return
-            
-            # 根据数量排列成网格
-            if num_cams <= 2:
-                cols = num_cams
-            elif num_cams <= 4:
-                cols = 2
-            elif num_cams <= 9:
-                cols = 3
+                        label += f"  {stats['hw_fps']:.0f}fps"
+                    cv2.putText(tile, label, (8, 18),
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (125, 220, 255), 1)
+
+                # 卡片边框
+                tile = cv2.copyMakeBorder(tile, 2, 2, 2, 2,
+                                          borderType=cv2.BORDER_CONSTANT,
+                                          value=(32, 32, 44))
+                return tile
+
+            # 构造所有 tile（即使没帧也显示占位，布局稳定）
+            tiles = [build_tile(cam_id) for cam_id in self.camera_ids]
+
+            # 8 路固定两栏 4+4：左列前4个，右列后4个（避免上下 4+4）
+            if num_cams == 8:
+                left_col = cv2.vconcat(tiles[:4])
+                right_col = cv2.vconcat(tiles[4:8])
+                combined = cv2.hconcat([left_col, right_col])
             else:
-                cols = 4
-            
-            rows_needed = (len(frames) + cols - 1) // cols
-            
-            # 补齐黑色帧使拼接整齐
-            h, w = frames[0].shape[:2]
-            while len(frames) < rows_needed * cols:
-                frames.append(np.zeros((h, w, 3), dtype=np.uint8))
-            
-            # 拼接网格
-            row_imgs = []
-            for r in range(rows_needed):
-                row_frames = frames[r * cols: (r + 1) * cols]
-                row_imgs.append(cv2.hconcat(row_frames))
-            combined = cv2.vconcat(row_imgs)
+                # 其它数量回退到常规网格
+                if num_cams <= 2:
+                    cols = num_cams
+                elif num_cams <= 4:
+                    cols = 2
+                elif num_cams <= 9:
+                    cols = 3
+                else:
+                    cols = 4
+
+                rows_needed = (len(tiles) + cols - 1) // cols
+                h, w = tiles[0].shape[:2]
+                while len(tiles) < rows_needed * cols:
+                    tiles.append(np.zeros((h, w, 3), dtype=np.uint8))
+
+                row_imgs = []
+                for r in range(rows_needed):
+                    row_frames = tiles[r * cols: (r + 1) * cols]
+                    row_imgs.append(cv2.hconcat(row_frames))
+                combined = cv2.vconcat(row_imgs)
             
             # 缩放适应canvas
             canvas_width = self.preview_canvas.winfo_width()
@@ -863,7 +882,6 @@ class RecorderGUI:
                 
                 resized = cv2.resize(combined, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
                 rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                from PIL import Image, ImageTk
                 img = Image.fromarray(rgb)
                 photo = ImageTk.PhotoImage(image=img)
                 
@@ -1043,8 +1061,9 @@ def main():
     """主函数"""
     # 检查依赖
     try:
-        from PIL import Image, ImageTk
-    except ImportError:
+        _ = Image
+        _ = ImageTk
+    except Exception:
         print("错误: 需要安装 Pillow 库")
         print("请运行: uv add pillow")
         return

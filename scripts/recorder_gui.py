@@ -84,7 +84,7 @@ class IMURecorder:
                 return False
             
             self.is_recording = True
-            self.start_time = time.time()
+            self.start_time = time.perf_counter()
             self.data_count = 0
             return True
             
@@ -112,8 +112,10 @@ class IMURecorder:
     def _on_imu_data(self, data):
         """IMU数据回调"""
         if self.is_recording and self.start_time:
-            timestamp = time.time() - self.start_time
-            self.data_queue.put((timestamp, data))
+            timestamp = time.perf_counter() - self.start_time
+            # 对齐到统一同步点之前的数据直接丢弃
+            if timestamp >= 0:
+                self.data_queue.put((timestamp, data))
     
     def flush_data(self):
         """将队列中的数据写入文件"""
@@ -148,8 +150,12 @@ class IMURecorder:
         
         return count
     
-    def reset_start_time(self):
-        """重置起始时间（用于与相机同步）"""
+    def reset_start_time(self, sync_time: float | None = None):
+        """重置起始时间（用于与相机同步）
+
+        Args:
+            sync_time: 与相机共享的 perf_counter 同步时间点；若为空则用当前时间。
+        """
         # 清空队列中之前的数据
         while not self.data_queue.empty():
             try:
@@ -157,7 +163,7 @@ class IMURecorder:
             except queue.Empty:
                 break
         # 重置起始时间
-        self.start_time = time.time()
+        self.start_time = float(sync_time) if sync_time is not None else time.perf_counter()
         self.data_count = 0
         print(f"IMU 起始时间已重置: {self.start_time:.6f}")
     
@@ -1184,14 +1190,16 @@ class RecorderGUI:
         self._status_dot.config(fg=self.C['rec'])
         self.status_var.set(f"正在录制到: {self.current_session_dir.name}")
         
-        # 重置 IMU 起始时间（与相机同步）
-        if self.imu_recorder:
-            self.imu_recorder.reset_start_time()
-        
         # 开始所有相机录制（带同步时间点）
         print("发送同步开始录制信号...")
         sync_time = self.camera_manager.begin_recording(countdown_seconds=0.1)
         print(f"同步时间点: {sync_time:.6f}")
+
+        # IMU 使用同一个 perf_counter 同步点，并补偿半帧对齐相机首帧时刻
+        if self.imu_recorder:
+            frame_period = 1.0 / max(1, int(self.fps_var.get()))
+            imu_sync_time = sync_time + 0.5 * frame_period
+            self.imu_recorder.reset_start_time(imu_sync_time)
         
         # 开始UI更新
         self.recording_start_time = time.perf_counter()

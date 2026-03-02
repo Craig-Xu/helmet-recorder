@@ -171,18 +171,15 @@ def camera_worker_process(
             if wait_time > 0:
                 time.sleep(wait_time)
         
-        # 清空相机双缓冲中的陈旧帧（等待期间积压的），丢弃 4 帧足够
-        for _ in range(4):
-            cap.grab()
-        
         # 初始化计数器
         frame_count = 0
         new_frames = 0
         duplicated = 0
         preview_seq = 0
-        
-        actual_start = time.perf_counter()
-        stats_array[4] = actual_start
+
+        # 起始时间放到“首帧成功采集时”再写入，避免统计起点提前
+        actual_start = 0.0
+        stats_array[4] = 0.0
         stats_array[5] = 1  # is_running = True
         
         # ================================================================
@@ -211,6 +208,10 @@ def camera_worker_process(
             
             new_frames += 1
             frame_count += 1
+
+            if actual_start == 0.0:
+                actual_start = time.perf_counter()
+                stats_array[4] = actual_start
             
             # 写入视频
             writer.write(frame)

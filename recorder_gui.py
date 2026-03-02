@@ -189,6 +189,7 @@ class RecorderGUI:
         
         # 加载配置
         self.config = self.load_config()
+        self.cam_to_video, self.video_to_cam = self._build_cam_maps_from_config()
         
         # 录制器
         self.camera_manager = None  # 多进程相机管理器
@@ -276,6 +277,44 @@ class RecorderGUI:
         except Exception as e:
             print(f"配置文件加载失败: {e}")
         return {}
+
+    def _build_cam_maps_from_config(self):
+        """从 config 构建 cam_id->video_id 与 video_id->cam_id 映射（兼容新旧方向）。"""
+        cam_cfg = self.config.get('camera', {})
+        camera_ids = [int(x) for x in cam_cfg.get('ids', [0])]
+        id_set = set(camera_ids)
+        raw = {int(k): int(v) for k, v in cam_cfg.get('index_map', {}).items()}
+
+        if not raw:
+            cam_to_video = {cid: cid for cid in camera_ids}
+        else:
+            keys = set(raw.keys())
+            vals = set(raw.values())
+            # 新格式: cam -> video
+            if vals.issubset(id_set):
+                cam_to_video = {cam: vid for cam, vid in raw.items() if vid in id_set}
+            # 旧格式: video -> cam
+            elif keys.issubset(id_set):
+                cam_to_video = {cam: vid for vid, cam in raw.items() if vid in id_set}
+            else:
+                cam_to_video = {cid: cid for cid in camera_ids}
+
+        # 补齐缺失项
+        used = set(cam_to_video.values())
+        for vid in camera_ids:
+            if vid not in used:
+                cam_to_video[vid] = vid
+
+        video_to_cam = {int(v): int(c) for c, v in cam_to_video.items()}
+        return cam_to_video, video_to_cam
+
+    def _ordered_video_ids_from_config(self):
+        """按 cam0..camN 顺序返回对应 /dev/video ID 列表。"""
+        return [self.cam_to_video[cid] for cid in sorted(self.cam_to_video.keys())]
+
+    def _format_cam_label(self, video_id: int) -> str:
+        cam_id = self.video_to_cam.get(int(video_id), int(video_id))
+        return f"Cam{cam_id} (/dev/video{video_id})"
     
     def create_ui(self):
         """创建用户界面 - 深色主题"""
@@ -342,7 +381,7 @@ class RecorderGUI:
         # ── 相机配置 ──
         sec('🎥', '相机配置')
         self.camera_ids_var = tk.StringVar(
-            value=','.join(map(str, self.config.get('camera', {}).get('ids', [0])))
+            value=','.join(map(str, self._ordered_video_ids_from_config()))
         )
         w = row('Camera IDs', lambda f: ttk.Entry(f, textvariable=self.camera_ids_var, style='D.TEntry'))
         self._setting_widgets.append(w)
@@ -532,8 +571,12 @@ class RecorderGUI:
         available = list_cameras()
         
         if available:
-            self.camera_ids_var.set(','.join(map(str, available)))
-            self.status_var.set(f"找到 {len(available)} 个相机: {available}")
+            ordered_cfg = self._ordered_video_ids_from_config()
+            ordered = [vid for vid in ordered_cfg if vid in available]
+            remaining = [vid for vid in available if vid not in ordered]
+            final_ids = ordered + remaining
+            self.camera_ids_var.set(','.join(map(str, final_ids)))
+            self.status_var.set(f"找到 {len(available)} 个相机(已按config排序): {final_ids}")
         else:
             self.status_var.set("未找到可用相机")
             messagebox.showwarning("警告", "未找到可用的相机设备")
@@ -566,6 +609,12 @@ class RecorderGUI:
             if not camera_ids:
                 messagebox.showerror("错误", "没有有效的相机ID")
                 return
+
+            # 按 config.yaml 中 cam 顺序重排 /dev/video 列表
+            cfg_order = self._ordered_video_ids_from_config()
+            in_cfg = [vid for vid in cfg_order if vid in camera_ids]
+            extra = [vid for vid in camera_ids if vid not in in_cfg]
+            camera_ids = in_cfg + extra
             
             # 创建会话目录
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -583,7 +632,7 @@ class RecorderGUI:
             # 创建多进程相机管理器
             print(f"\n=== 启动多进程相机系统 ===")
             print(f"目标帧率: {fps} fps, 分辨率: {width}x{height}")
-            print(f"相机ID: {camera_ids}")
+            print(f"相机设备顺序(/dev/video): {camera_ids}")
             
             self.camera_manager = MultiCameraManager(camera_ids, width, height, fps)
             
@@ -768,7 +817,7 @@ class RecorderGUI:
                     small = cv2.resize(frame, thumb_size, interpolation=cv2.INTER_NEAREST)
                     
                     # 添加相机ID和帧数标签
-                    label = f"Cam{cam_id}"
+                    label = self._format_cam_label(cam_id)
                     if stats:
                         label += f" {stats['frames']}f {stats['hw_fps']:.0f}fps"
                     cv2.putText(small, label, (4, 16),
@@ -878,7 +927,7 @@ class RecorderGUI:
             for cam_id in self.camera_ids:
                 stats = all_stats.get(cam_id)
                 if stats:
-                    line = (f"Cam{cam_id}: {stats['frames']}帧, "
+                    line = (f"{self._format_cam_label(cam_id)}: {stats['frames']}帧, "
                             f"新帧{stats['new_frames']}({stats['hw_fps']:.1f}fps), "
                             f"重复{stats['duplicated']}")
                     print(line)
@@ -901,7 +950,7 @@ class RecorderGUI:
         low_fps_cams = []
         for cam_id, stats in all_stats.items():
             if stats and stats['hw_fps'] < target_fps * 0.9:
-                low_fps_cams.append(f"Cam{cam_id}: {stats['hw_fps']:.1f}fps")
+                low_fps_cams.append(f"{self._format_cam_label(cam_id)}: {stats['hw_fps']:.1f}fps")
         
         # 清理
         self.cleanup_recording()
@@ -939,17 +988,18 @@ class RecorderGUI:
                 f.write(f"录制时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"架构: 多进程 (每个相机独立进程)\n")
                 f.write(f"相机数量: {len(self.camera_ids)}\n")
-                f.write(f"相机ID: {self.camera_ids}\n")
+                f.write(f"相机设备ID(/dev/video): {self.camera_ids}\n")
                 f.write(f"分辨率: {self.width_var.get()}x{self.height_var.get()}\n")
                 f.write(f"帧率: {self.fps_var.get()} fps\n")
                 f.write(f"IMU端口: {self.imu_port_var.get()}\n")
                 f.write(f"IMU波特率: {self.imu_baud_var.get()}\n")
                 f.write("\n录制统计:\n")
+                f.write(f"cam->video 映射: {dict(sorted(self.cam_to_video.items()))}\n")
                 
                 if all_stats:
                     for cam_id, stats in all_stats.items():
                         if stats:
-                            f.write(f"  相机 {cam_id}: "
+                            f.write(f"  {self._format_cam_label(cam_id)}: "
                                    f"{stats['frames']} 帧, "
                                    f"新帧 {stats['new_frames']} (硬件{stats['hw_fps']:.1f}fps), "
                                    f"重复帧 {stats['duplicated']}, "

@@ -44,6 +44,24 @@ def quat_mean(quats: np.ndarray) -> np.ndarray:
     return avg / np.linalg.norm(avg)
 
 
+def _resolve_cam_to_video(camera_ids: list[int], raw_index_map: dict) -> dict[int, int]:
+    """统一 index_map 为 cam_id -> /dev/video_id，兼容新旧两种配置方向。"""
+    ids = [int(x) for x in camera_ids]
+    id_set = set(ids)
+    raw = {int(k): int(v) for k, v in (raw_index_map or {}).items()}
+    if not raw:
+        return {cid: cid for cid in ids}
+
+    keys = set(raw.keys())
+    vals = set(raw.values())
+
+    if vals.issubset(id_set):
+        return {cam: vid for cam, vid in raw.items() if vid in id_set}
+    if keys.issubset(id_set):
+        return {cam: vid for vid, cam in raw.items() if vid in id_set}
+    return {cam: vid for cam, vid in raw.items()}
+
+
 class CameraCalibrationNode(Node):
     def __init__(self):
         super().__init__('camera_aruco_calib_node')
@@ -53,7 +71,10 @@ class CameraCalibrationNode(Node):
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
 
-        self.camera_ids = config.get('camera', {}).get('ids', [0, 2, 4, 6, 8, 10, 12, 14])
+        cam_cfg = config.get('camera', {})
+        capture_ids = [int(x) for x in cam_cfg.get('ids', [0, 2, 4, 6, 8, 10, 12, 14])]
+        self.cam_to_video = _resolve_cam_to_video(capture_ids, cam_cfg.get('index_map', {}))
+        self.camera_ids = sorted(self.cam_to_video.keys())
         self.marker_size = 0.1  # 标记边长（米），根据实际打印尺寸修改
 
         # 2. ArUco 检测器 + 调优参数
@@ -111,8 +132,11 @@ class CameraCalibrationNode(Node):
         )
         for cam_id in self.camera_ids:
             topic = f'/helmet/cam{cam_id}/image_raw'
+            video_id = self.cam_to_video.get(cam_id, cam_id)
             self.create_subscription(Image, topic, self.make_callback(cam_id), qos_profile)
-            self.get_logger().info(f'Subscribed: {topic}')
+            self.get_logger().info(
+                f'Subscribed: {topic} (from /dev/video{video_id})'
+            )
 
     # ── 图像回调 ─────────────────────────────────────────────────────────────
     def make_callback(self, cam_id):

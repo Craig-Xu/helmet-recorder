@@ -56,6 +56,29 @@ _QOS_REALTIME = QoSProfile(
 )
 
 
+def _resolve_cam_to_video(camera_ids: list[int], raw_index_map: dict) -> dict[int, int]:
+    """统一 index_map 为 cam_id -> /dev/video_id，兼容新旧两种配置方向。"""
+    ids = [int(x) for x in camera_ids]
+    id_set = set(ids)
+    raw = {int(k): int(v) for k, v in (raw_index_map or {}).items()}
+    if not raw:
+        return {cid: cid for cid in ids}
+
+    keys = set(raw.keys())
+    vals = set(raw.values())
+
+    # 新格式：cam -> video（value 在 camera.ids 里）
+    if vals.issubset(id_set):
+        return {cam: vid for cam, vid in raw.items() if vid in id_set}
+
+    # 旧格式：video -> cam（key 在 camera.ids 里）
+    if keys.issubset(id_set):
+        return {cam: vid for vid, cam in raw.items() if vid in id_set}
+
+    # 回退：尽量按新格式解释
+    return {cam: vid for cam, vid in raw.items()}
+
+
 # ─────────────────────────────────────────────
 # 工具函数：V4L2 正确属性设置顺序
 # ─────────────────────────────────────────────
@@ -132,27 +155,31 @@ class CameraPublisherNode(Node):
         self.declare_parameter('height',     cam_cfg.get('height', 480))
         self.declare_parameter('fps',        30)
 
-        camera_ids = list(self.get_parameter('camera_ids').value)
+        camera_ids = [int(x) for x in self.get_parameter('camera_ids').value]
         width      = int(self.get_parameter('width').value)
         height     = int(self.get_parameter('height').value)
         fps        = int(self.get_parameter('fps').value)
+        cam_to_video = _resolve_cam_to_video(camera_ids, cam_cfg.get('index_map', {}))
 
         self.get_logger().info(
-            f"Camera IDs={camera_ids}  {width}x{height} @ {fps}fps"
+            f"Cam->Video map={cam_to_video}  {width}x{height} @ {fps}fps"
         )
 
         # ── 为每个相机创建发布者和采集线程 ──
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
 
-        for cam_id in camera_ids:
-            topic = f'/helmet/cam{cam_id}/image_raw'
+        for topic_cam_id in sorted(cam_to_video.keys()):
+            cam_id = int(cam_to_video[topic_cam_id])
+            topic = f'/helmet/cam{topic_cam_id}/image_raw'
             pub = self.create_publisher(Image, topic, qos_profile=_QOS_REALTIME)
-            self.get_logger().info(f"Publishing Cam{cam_id} → {topic}")
+            self.get_logger().info(
+                f"Publishing /dev/video{cam_id} as Cam{topic_cam_id} → {topic}"
+            )
 
             t = threading.Thread(
                 target=self._camera_loop,
-                args=(cam_id, width, height, fps, pub),
+                args=(cam_id, topic_cam_id, width, height, fps, pub),
                 daemon=True,
                 name=f'cam{cam_id}',
             )
@@ -174,6 +201,7 @@ class CameraPublisherNode(Node):
     def _camera_loop(
         self,
         camera_id: int,
+        topic_cam_id: int,
         width: int,
         height: int,
         fps: int,
@@ -186,7 +214,7 @@ class CameraPublisherNode(Node):
             return
 
         # ── 预分配消息，每帧只更新 stamp + data，避免重复分配 Python 对象 ──
-        msg = _make_image_msg(width, height, f'cam{camera_id}')
+        msg = _make_image_msg(width, height, f'cam{topic_cam_id}')
         # numpy view 直接指向 msg.data 的内存，写入 view == 写入消息
         buf = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
 

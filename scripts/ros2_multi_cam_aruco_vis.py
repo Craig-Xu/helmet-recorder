@@ -23,6 +23,24 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_HERE))
 
+
+def _resolve_cam_to_video(camera_ids: list[int], raw_index_map: dict) -> dict[int, int]:
+    """统一 index_map 为 cam_id -> /dev/video_id，兼容新旧两种配置方向。"""
+    ids = [int(x) for x in camera_ids]
+    id_set = set(ids)
+    raw = {int(k): int(v) for k, v in (raw_index_map or {}).items()}
+    if not raw:
+        return {cid: cid for cid in ids}
+
+    keys = set(raw.keys())
+    vals = set(raw.values())
+
+    if vals.issubset(id_set):
+        return {cam: vid for cam, vid in raw.items() if vid in id_set}
+    if keys.issubset(id_set):
+        return {cam: vid for vid, cam in raw.items() if vid in id_set}
+    return {cam: vid for cam, vid in raw.items()}
+
 class MultiCameraVisualizer(Node):
     def __init__(self):
         super().__init__('multi_camera_visualizer')
@@ -33,10 +51,15 @@ class MultiCameraVisualizer(Node):
             config = yaml.safe_load(f)
 
         # 定义要订阅的相机 ID
-        self.camera_ids = config.get('camera', {}).get('ids', [0, 2, 4, 6, 8, 10, 12, 14])
-        self.get_logger().info(f'Loaded cameras: {self.camera_ids}')
+        cam_cfg = config.get('camera', {})
+        capture_ids = [int(x) for x in cam_cfg.get('ids', [0, 2, 4, 6, 8, 10, 12, 14])]
+        cam_to_video = _resolve_cam_to_video(capture_ids, cam_cfg.get('index_map', {}))
+        self.topic_camera_ids = sorted(cam_to_video.keys())
+        self.get_logger().info(
+            f'Loaded cameras (display order by cam*): {self.topic_camera_ids}'
+        )
 
-        self.frames = {cam_id: None for cam_id in self.camera_ids}
+        self.frames = {cam_id: None for cam_id in self.topic_camera_ids}
         self.lock = threading.Lock()
 
         # ── ArUco 检测器（与标定节点参数保持一致）──
@@ -77,7 +100,7 @@ class MultiCameraVisualizer(Node):
 
         # 订阅所有话题
         self.subs = []
-        for cam_id in self.camera_ids:
+        for cam_id in self.topic_camera_ids:
             topic = f'/helmet/cam{cam_id}/image_raw'
             sub = self.create_subscription(
                 Image,
@@ -151,7 +174,7 @@ class MultiCameraVisualizer(Node):
 
     def display_loop(self):
         ncols = 4
-        nrows = (len(self.camera_ids) + ncols - 1) // ncols
+        nrows = (len(self.topic_camera_ids) + ncols - 1) // ncols
         win_w, win_h = 1280, 240 * nrows * 2  # 每格 320x240，拼接后缩放
         cv2.namedWindow("Helmet ArUco Viewer", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Helmet ArUco Viewer", win_w, win_h)
@@ -162,7 +185,7 @@ class MultiCameraVisualizer(Node):
                                for cid, f in self.frames.items()}
 
             cells = []
-            for cam_id in self.camera_ids:
+            for cam_id in self.topic_camera_ids:
                 frame = frames_snap[cam_id]
                 if frame is None:
                     frame = np.zeros((480, 640, 3), dtype=np.uint8)

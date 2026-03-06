@@ -5,4 +5,8 @@ build/
 log/
 
 *.pyc
+
+*/*/.pyc
 __pycache__/
+
+calib_intrinsics/

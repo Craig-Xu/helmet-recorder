@@ -22,6 +22,9 @@ setup(
     entry_points={
         'console_scripts': [
             'camera_publisher = helmet_recorder_ros2.camera_publisher:main',
+            'imu_publisher = helmet_recorder_ros2.imu_publisher:main',
+            'camera_imu_vis = helmet_recorder_ros2.camera_imu_vis:main',
+            'fps_monitor = helmet_recorder_ros2.fps_monitor:main',
             'aruco_calib = helmet_recorder_ros2.aruco_calib:main',
             'save_cam_extrinsics = helmet_recorder_ros2.save_cam_extrinsics:main',
             'image_calib_save_extrinsics = helmet_recorder_ros2.image_calib_save_extrinsics:main',

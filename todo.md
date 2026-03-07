@@ -1,5 +1,5 @@
  - 断电顺序不变测试
- - ros2 发布测试 launch
+ <!-- - ros2 发布测试 launch -->
  - uv 测试/ python+ros依赖问题测试
 
  - readme 

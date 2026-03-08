@@ -19,6 +19,8 @@ class MultiCameraVisualizer(Node):
         super().__init__('multi_camera_visualizer')
 
         self.declare_parameter('config_path', '')
+        self.declare_parameter('high_res', False)  # 高分辨率模式
+        
         config_path = resolve_config_path(str(self.get_parameter('config_path').value or ''))
         config = load_yaml(config_path)
 
@@ -28,9 +30,16 @@ class MultiCameraVisualizer(Node):
         self.topic_camera_ids = sorted(cam_to_video.keys())
         self.topic_to_capture = {int(cam): int(vid) for cam, vid in cam_to_video.items()}
 
-        # 显示配置：优先保证帧率
-        self.tile_w = 160  # 降低分辨率以提升帧率
-        self.tile_h = 120
+        # 显示配置：根据 high_res 参数选择分辨率
+        high_res = self.get_parameter('high_res').value
+        if high_res:
+            self.tile_w = 640  # 高分辨率模式
+            self.tile_h = 480
+            self.get_logger().info('高分辨率模式: 640x480')
+        else:
+            self.tile_w = 160  # 低分辨率模式（优先帧率）
+            self.tile_h = 120
+            self.get_logger().info('低分辨率模式（优先帧率）: 160x120')
         self.max_cols = 4
 
         self.frames = {cam_id: None for cam_id in self.topic_camera_ids}

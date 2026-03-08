@@ -215,7 +215,7 @@ class RecorderGUI:
         # 定时器
         self.update_timer = None
         self.imu_flush_timer = None
-        self.preview_interval_ms = 120  # 约 8fps 预览，比原 3fps 更流畅
+        self.preview_interval_ms = 10  # 约 30fps 预览
 
         # 页面模式: record / playback
         self.current_mode = None
@@ -334,22 +334,40 @@ class RecorderGUI:
         return f"Cam{cam_id} (/dev/video{video_id})"
 
     def _rename_recorded_videos_to_cam_ids(self):
-        """将输出视频按逻辑相机编号重命名（例如 0..7.mp4）。"""
+        """将输出视频按逻辑相机编号重命名（例如 0..7.mp4）。
+        
+        分两阶段：先移到唯一临时名，再移到最终 cam 名，
+        避免 video_id 与 cam_id 交叉时互相覆盖导致文件丢失。
+        """
         if not self.current_session_dir:
             return
 
+        # 第一阶段：video_id.mp4 → tmp_video_id.mp4
+        pending = []  # (tmp_path, dst_path)
         for video_id in self.camera_ids:
             cam_id = self.video_to_cam.get(int(video_id), int(video_id))
             src = self.current_session_dir / f"{int(video_id)}.mp4"
             dst = self.current_session_dir / f"{int(cam_id)}.mp4"
-            if not src.exists() or src == dst:
+            if not src.exists():
+                print(f"跳过重命名: {src.name} 不存在")
                 continue
+            if src == dst:
+                continue  # 名字已正确，不需要处理
+            tmp = self.current_session_dir / f"_tmp_{int(video_id)}.mp4"
+            try:
+                src.rename(tmp)
+                pending.append((tmp, dst))
+            except Exception as e:
+                print(f"重命名到临时文件失败 {src.name}: {e}")
+
+        # 第二阶段：tmp_video_id.mp4 → cam_id.mp4
+        for tmp, dst in pending:
             try:
                 if dst.exists():
                     dst.unlink()
-                src.rename(dst)
+                tmp.rename(dst)
             except Exception as e:
-                print(f"重命名失败 {src.name} -> {dst.name}: {e}")
+                print(f"重命名到最终文件失败 {tmp.name} -> {dst.name}: {e}")
     
     def create_ui(self):
         """创建用户界面 - 深色主题"""
@@ -1261,8 +1279,8 @@ class RecorderGUI:
 
             # 固定缩略图尺寸：画面更清晰，标签更易读
             if num_cams >= 8:
-                thumb_size = (240, 135)  # 降低拼接分辨率，减轻 UI 压力
-                font_scale = 0.48
+                thumb_size = (320, 240)  # 240p
+                font_scale = 0.55
             elif num_cams <= 2:
                 thumb_size = (360, 240)
                 font_scale = 0.6
@@ -1300,11 +1318,11 @@ class RecorderGUI:
             # 构造所有 tile（即使没帧也显示占位，布局稳定）
             tiles = [build_tile(cam_id) for cam_id in self.camera_ids]
 
-            # 8 路固定两栏 4+4：左列前4个，右列后4个（避免上下 4+4）
+            # 8 路固定两行 4+4：上行前4个，下行后4个
             if num_cams == 8:
-                left_col = cv2.vconcat(tiles[:4])
-                right_col = cv2.vconcat(tiles[4:8])
-                combined = cv2.hconcat([left_col, right_col])
+                top_row = cv2.hconcat(tiles[:4])
+                bot_row = cv2.hconcat(tiles[4:8])
+                combined = cv2.vconcat([top_row, bot_row])
             else:
                 # 其它数量回退到常规网格
                 if num_cams <= 2:

@@ -15,6 +15,7 @@ dependencies = [
     "pyserial>=3.5",
     "pyyaml>=6.0",
     "matplotlib>=3.10.8",
+    "scipy>=1.15.3",
 ]
 
 [project.optional-dependencies]

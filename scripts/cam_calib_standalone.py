@@ -46,7 +46,7 @@ INDEX_AXIS      = 0          # 0=x
 INDEX_DESC      = False
 MIDDLE_COUNT    = 4
 MIDDLE_Z_ASC    = True
-SWAP_PAIRS      = [ (4, 5)]   # 业务修正：排序后交换这些 cam 对
+SWAP_PAIRS      = []   # 业务修正：排序后交换这些 cam 对
 REF_CAM_ID      = 3          # 主摄像头新编号
 
 

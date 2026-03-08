@@ -7,6 +7,10 @@ import argparse
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
+
+# 允许从 scripts/ 目录外直接运行时也能找到 common
+sys.path.insert(0, str(Path(__file__).parent))
 
 try:
     from serial.tools import list_ports
@@ -14,6 +18,12 @@ except Exception as exc:  # pragma: no cover
     print(f"导入 pyserial 失败: {exc}")
     print("请先安装依赖: uv sync")
     sys.exit(1)
+
+try:
+    from common import CONFIG_PATH, load_yaml, save_yaml
+    _HAS_COMMON = True
+except ImportError:
+    _HAS_COMMON = False
 
 
 @dataclass(frozen=True)
@@ -74,9 +84,27 @@ def wait_enter(prompt: str) -> None:
     input('完成后按回车继续...')
 
 
+def update_config_port(port: str, auto: bool = False) -> bool:
+    """将 imu.port 写入 config/config.yaml，返回是否成功。"""
+    if not _HAS_COMMON:
+        print('  (无法导入 common 模块，请手动修改 config/config.yaml)')
+        return False
+    if not auto:
+        ans = input(f'是否将 imu.port 更新为 {port}？(y/N) ').strip().lower()
+        if ans != 'y':
+            print('  跳过写入配置。')
+            return False
+    cfg = load_yaml(CONFIG_PATH)
+    cfg.setdefault('imu', {})['port'] = port
+    save_yaml(CONFIG_PATH, cfg)
+    print(f'  ✅ 已写入 {CONFIG_PATH}：imu.port = {port}')
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description='通过拔插检测 IMU 串口')
     parser.add_argument('--pause', type=float, default=0.8, help='每次回车后等待系统刷新设备列表的秒数 (默认: 0.8)')
+    parser.add_argument('--auto-write', action='store_true', help='检测到端口后自动写入 config，无需确认')
     args = parser.parse_args()
 
     print('=== IMU 串口拔插检测工具 ===')
@@ -109,6 +137,18 @@ def main() -> int:
         for p in added:
             print(f'  ✅ {p.device}')
             print(f'     {format_port(p)}')
+        # 若只检测到一个端口，直接提示写入；多个端口让用户选择
+        if len(added) == 1:
+            update_config_port(added[0].device, auto=args.auto_write)
+        else:
+            print('\n检测到多个新增端口，请选择要写入 config 的端口：')
+            for i, p in enumerate(added):
+                print(f'  [{i}] {p.device}  {p.product or p.description}')
+            choice = input('输入序号（回车跳过）: ').strip()
+            if choice.isdigit() and 0 <= int(choice) < len(added):
+                update_config_port(added[int(choice)].device, auto=args.auto_write)
+            else:
+                print('  跳过写入配置。')
     else:
         print('\n未检测到新增端口。')
         print('可尝试:')
@@ -117,7 +157,7 @@ def main() -> int:
         print('  3) 查看内核日志: dmesg | tail -n 50')
         return 1
 
-    print('\n完成。把上面输出的设备路径（如 /dev/ttyUSB0）填到 config/config.yaml 的 imu.port 即可。')
+    print('\n完成。')
     return 0
 
 

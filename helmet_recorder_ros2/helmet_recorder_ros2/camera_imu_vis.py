@@ -23,6 +23,8 @@ class CameraIMUVisualizer(Node):
         super().__init__('camera_imu_visualizer')
 
         self.declare_parameter('config_path', '')
+        self.declare_parameter('high_res', False)  # 高分辨率模式
+        
         config_path = resolve_config_path(str(self.get_parameter('config_path').value or ''))
         config = load_yaml(config_path)
 
@@ -32,9 +34,16 @@ class CameraIMUVisualizer(Node):
         self.camera_ids = sorted(cam_to_video.keys())
         self.topic_to_capture = {int(cam): int(vid) for cam, vid in cam_to_video.items()}
 
-        # 显示配置：优先保证帧率
-        self.tile_w = 160  # 降低分辨率以提升帧率
-        self.tile_h = 120
+        # 显示配置：根据 high_res 参数选择分辨率
+        high_res = self.get_parameter('high_res').value
+        if high_res:
+            self.tile_w = 640  # 高分辨率模式
+            self.tile_h = 480
+            self.get_logger().info('高分辨率模式: 640x480')
+        else:
+            self.tile_w = 160  # 低分辨率模式（优先帧率）
+            self.tile_h = 120
+            self.get_logger().info('低分辨率模式（优先帧率）: 160x120')
         self.max_cols = 4
         self.fullscreen = False  # 全屏状态
 
@@ -76,7 +85,11 @@ class CameraIMUVisualizer(Node):
         self.fps_counter = deque(maxlen=30)  # 用于计算实际帧率
         
         # 预分配IMU面板缓冲区（避免每帧创建）
-        self.imu_panel_width = 300  # 减小宽度以节省性能
+        # 根据分辨率调整面板宽度
+        if high_res:
+            self.imu_panel_width = 400  # 高分辨率下使用更宽的面板
+        else:
+            self.imu_panel_width = 160  # 低分辨率下紧凑面板（与tile同宽）
         self.imu_panel_buffer = None  # 将在display_loop初始化
 
         self.stop_event = threading.Event()
@@ -172,37 +185,159 @@ class CameraIMUVisualizer(Node):
 
     def draw_imu_panel(self, panel: np.ndarray) -> np.ndarray:
         """绘制IMU数据面板（复用缓冲区）"""
-        # 清空面板
-        panel[:] = 0
+        # 清空面板（深灰色背景）
+        panel[:] = (30, 30, 30)
         
         height = panel.shape[0]
+        width = panel.shape[1]
 
         with self.lock:
             imu = self.imu_data
 
         if imu is None:
-            cv2.putText(panel, 'IMU: No Data', (10, height // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.putText(panel, 'IMU: No Data', (15, height // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
             return panel
 
-        # 简化版文本（减少绘制调用）
-        y_pos = 25
-        cv2.putText(panel, 'IMU', (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-        # 姿态角（单行显示）
-        y_pos += 35
-        cv2.putText(panel, f"R:{imu['roll']:6.1f} P:{imu['pitch']:6.1f} Y:{imu['yaw']:6.1f}", (10, y_pos),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-
-        # 加速度（单行显示）
-        y_pos += 30
-        cv2.putText(panel, f"Acc: {imu['acc_x']:5.2f},{imu['acc_y']:5.2f},{imu['acc_z']:5.2f}", (10, y_pos),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-
-        # 角速度（单行显示）
-        y_pos += 25
-        cv2.putText(panel, f"Gyr: {imu['gyro_x']:6.1f},{imu['gyro_y']:6.1f},{imu['gyro_z']:6.1f}", (10, y_pos),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        # 根据面板宽度选择字体大小和布局
+        if width >= 400:
+            font_scale_title = 1.3
+            font_scale_label = 0.8
+            font_scale_value = 1.0
+            thickness_title = 3
+            thickness_label = 2  # 标签加粗
+            thickness_normal = 2
+            spacing = 55
+            compact_mode = False
+        else:
+            # 低分辨率模式：紧凑布局，保证所有内容可见（面板高约240px）
+            font_scale_title = 0.7
+            font_scale_label = 0.45
+            font_scale_value = 0.55
+            thickness_title = 2
+            thickness_label = 1
+            thickness_normal = 1
+            spacing = 17  # 极紧凑间距
+            compact_mode = True  # 启用紧凑模式
+        
+        y_pos = 13 if compact_mode else 40
+        
+        # 标题
+        cv2.putText(panel, 'IMU', (15, y_pos), cv2.FONT_HERSHEY_DUPLEX,
+                    font_scale_title, (255, 255, 255), thickness_title, cv2.LINE_AA)
+        y_pos += spacing if compact_mode else spacing - 5
+        
+        # === 紧凑模式布局 ===
+        if compact_mode:
+            # 姿态角
+            cv2.putText(panel, 'Orient(deg)', (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (180, 180, 180), thickness_label, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"R:{imu['roll']:6.1f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (100, 200, 255), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"P:{imu['pitch']:6.1f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (100, 255, 200), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"Y:{imu['yaw']:6.1f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 200, 100), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            
+            # 加速度
+            cv2.putText(panel, 'Accel(g)', (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (180, 180, 180), thickness_label, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"X:{imu['acc_x']:5.2f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (0, 255, 128), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"Y:{imu['acc_y']:5.2f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (0, 255, 128), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"Z:{imu['acc_z']:5.2f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (0, 255, 128), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            
+            # 角速度
+            cv2.putText(panel, 'Gyro(deg/s)', (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (180, 180, 180), thickness_label, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"X:{imu['gyro_x']:6.1f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 100, 255), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"Y:{imu['gyro_y']:6.1f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 100, 255), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            cv2.putText(panel, f"Z:{imu['gyro_z']:6.1f}", (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 100, 255), thickness_normal, cv2.LINE_AA)
+        else:
+            # 分割线
+            cv2.line(panel, (15, y_pos), (width - 15, y_pos), (100, 100, 100), 1)
+            y_pos += spacing - 10
+            
+            # === 姿态角 ===
+            cv2.putText(panel, 'Orientation (deg)', (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (180, 180, 180), thickness_label, cv2.LINE_AA)
+            y_pos += spacing - 15
+            
+            # Roll
+            cv2.putText(panel, 'Roll:', (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (100, 200, 255), thickness_label, cv2.LINE_AA)
+            cv2.putText(panel, f"{imu['roll']:7.2f}", (width - 120, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (100, 200, 255), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing - 10
+            
+            # Pitch
+            cv2.putText(panel, 'Pitch:', (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (100, 255, 200), thickness_label, cv2.LINE_AA)
+            cv2.putText(panel, f"{imu['pitch']:7.2f}", (width - 120, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (100, 255, 200), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing - 10
+            
+            # Yaw
+            cv2.putText(panel, 'Yaw:', (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (255, 200, 100), thickness_label, cv2.LINE_AA)
+            cv2.putText(panel, f"{imu['yaw']:7.2f}", (width - 120, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 200, 100), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            
+            # 分割线
+            cv2.line(panel, (15, y_pos - 10), (width - 15, y_pos - 10), (100, 100, 100), 1)
+            y_pos += spacing - 20
+            
+            # === 加速度 ===
+            cv2.putText(panel, 'Acceleration (g)', (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (180, 180, 180), thickness_label, cv2.LINE_AA)
+            y_pos += spacing - 15
+            
+            # X, Y, Z
+            cv2.putText(panel, f"X:{imu['acc_x']:6.2f}", (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (0, 255, 128), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing - 10
+            cv2.putText(panel, f"Y:{imu['acc_y']:6.2f}", (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (0, 255, 128), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing - 10
+            cv2.putText(panel, f"Z:{imu['acc_z']:6.2f}", (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (0, 255, 128), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing
+            
+            # 分割线
+            cv2.line(panel, (15, y_pos - 10), (width - 15, y_pos - 10), (100, 100, 100), 1)
+            y_pos += spacing - 20
+            
+            # === 角速度 ===
+            cv2.putText(panel, 'Gyroscope (deg/s)', (15, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_label, (180, 180, 180), thickness_label, cv2.LINE_AA)
+            y_pos += spacing - 15
+            
+            # X, Y, Z
+            cv2.putText(panel, f"X:{imu['gyro_x']:7.1f}", (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 100, 255), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing - 10
+            cv2.putText(panel, f"Y:{imu['gyro_y']:7.1f}", (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 100, 255), thickness_normal, cv2.LINE_AA)
+            y_pos += spacing - 10
+            cv2.putText(panel, f"Z:{imu['gyro_z']:7.1f}", (20, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_value, (255, 100, 255), thickness_normal, cv2.LINE_AA)
 
         return panel
 

@@ -456,18 +456,31 @@ class MultiCameraManager:
     
     def start_all(self, output_path: Path) -> list:
         """
-        启动所有相机进程
-        返回成功启动的相机ID列表
+        并行启动所有相机进程，同时等待各相机就绪信号。
+        返回成功启动的相机 ID 列表
         """
-        successful = []
-        for cam_id, camera in self.cameras.items():
-            if camera.start(output_path):
-                successful.append(cam_id)
-                print(f"相机 {cam_id}: 进程启动成功")
-            else:
-                print(f"相机 {cam_id}: 进程启动失败")
-        
-        return successful
+        import threading
+
+        results: dict[int, bool] = {}
+        results_lock = threading.Lock()
+
+        def _start_one(cam_id: int, camera: 'MultiProcessCamera'):
+            ok = camera.start(output_path)
+            with results_lock:
+                results[cam_id] = ok
+            print(f"相机 {cam_id}: {'进程启动成功' if ok else '进程启动失败'}")
+
+        threads = [
+            threading.Thread(target=_start_one, args=(cam_id, camera), daemon=True)
+            for cam_id, camera in self.cameras.items()
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15.0)  # 并行等待，总耗时约等于最慢单台相机的时间
+
+        # 按原始相机列表顺序返回成功列表
+        return [cam_id for cam_id in self.cameras if results.get(cam_id, False)]
     
     def begin_recording(self, countdown_seconds: float = 0.0):
         """同时开始所有相机的录制

@@ -1,161 +1,261 @@
-# 多相机+IMU 数据采集系统
+# Helmet Recorder Tools
 
-多进程架构的数据采集工具，用于同步录制多个摄像头视频和 IMU 传感器数据。
+多相机 + IMU 数据采集头盔工具集。支持独立 GUI 录制（无需 ROS2）和 ROS2 驱动两种使用模式。
 
-## 文档
+---
 
-- 完整使用说明书: [docs/user_guide.md](docs/user_guide.md)
+## 目录
 
-项目示意图：
+1. [硬件与依赖](#1-硬件与依赖)
+2. [安装](#2-安装)
+3. [配置文件](#3-配置文件)
+4. [ArUco 相机校准（必须）](#4-aruco-相机校准必须)
+5. [独立录制 GUI（无需 ROS2）](#5-独立录制-gui无需-ros2)
+6. [ROS2 驱动模式](#6-ros2-驱动模式)
+   - [编译](#61-编译)
+   - [Launch 参数说明](#62-launch-参数说明)
+   - [常用启动命令](#63-常用启动命令)
+7. [实用工具脚本](#7-实用工具脚本)
 
-![系统示意图](docs/images/overview.png)
+---
 
-## 快速开始
+## 1. 硬件与依赖
+
+| 组件 | 说明 |
+|------|------|
+| 相机 | 8 路 USB 相机，支持 MJPG 格式（USB 带宽允许 8×640×480@30fps） |
+| IMU | Yesense 系列 IMU，串口连接 |
+| 系统 | Ubuntu 22.04，Python ≥ 3.10 |
+| ROS2 | Humble（仅 ROS2 模式需要） |
+
+---
+
+## 2. 安装
+
+### 2.1 安装 Python 依赖（uv）
 
 ```bash
-# 安装依赖
-uv sync
+# 安装 uv（如未安装）
+curl -Lsf https://astral.sh/uv/install.sh | sh
 
-# 运行 GUI 程序
+# 在项目根目录创建虚拟环境并安装依赖
+cd /path/to/helmet_recorder_tools
+uv sync
+```
+
+---
+
+## 3. 配置文件
+
+所有系统配置位于 `config/config.yaml`：
+
+```yaml
+imu:
+  port: /dev/ttyACM0      # IMU 串口设备
+  bps: 460800             # 波特率
+
+camera:
+  ids: [0, 2, 4, 6, 8, 10, 12, 14]   # /dev/video 设备 ID 列表
+  index_map:              # 逻辑相机编号 → /dev/video ID 映射
+    0: 8                  # cam0 对应 /dev/video8
+    1: 14
+    2: 2
+    3: 10
+    4: 0
+    5: 6
+    6: 4
+    7: 12
+  width: 640
+  height: 480
+```
+
+**查找 IMU 串口**（拔插检测）：
+
+```bash
+uv run scripts/imu_find_port.py
+# 检测到端口后会询问是否自动写入 config.yaml
+# 或使用 --auto-write 跳过确认
+uv run scripts/imu_find_port.py --auto-write
+```
+
+---
+
+## 4. ArUco 相机校准（必须）
+
+> ⚠️ **重要：每次重新连接相机或系统重启后，USB 设备枚举顺序可能发生变化，导致 `/dev/video*` 编号与物理相机位置错位。必须在使用录制或 ROS2 发布前运行一次 ArUco 校准，以确保相机编号顺序正确。**
+
+校准使用 **ArUco marker_0**（ID=0，字典 DICT_6X6_1000）作为公共参考点，脚本会自动识别各相机看到 marker 的位置关系，重新排列 `index_map` 并写入 `config/config.yaml`。
+
+![ArUco 校准示意图](docs/images/ArUco%20Calibration.png)
+
+打印 ArUco marker_0（推荐边长 **10 cm**，纸张平整粘在硬板上），放置在所有相机均可见的位置。
+
+#### 运行校准脚本
+
+```bash
+uv run scripts/cam_calib_standalone.py
+```
+
+标定窗口会显示所有相机的实时画面和 ArUco 检测状态：
+
+```
+┌──────────┬──────────┬──────────┬──────────┐
+│  Cam0    │  Cam1    │  Cam2    │  Cam3    │
+│ [marker] │ [marker] │          │ [marker] │
+│ ✅ 45smp │ ✅ 52smp │ ❌ 未检测 │ ✅ 48smp │
+├──────────┼──────────┼──────────┼──────────┤
+│  Cam4    │  Cam5    │  Cam6    │  Cam7    │
+│ [marker] │          │ [marker] │ [marker] │
+│ ✅ 50smp │ ❌ 未检测 │ ✅ 39smp │ ✅ 61smp │
+└──────────┴──────────┴──────────┴──────────┘
+```
+
+| 按键 | 功能 |
+|------|------|
+| `y` | 开始收集样本（约 5 秒），完成后自动计算并写入 `config/config.yaml` |
+| `q` | 退出 |
+
+标定成功后，`config.yaml` 中会写入 `camera.extrinsics` 和 `camera.index_map`。
+
+---
+
+## 5. 独立录制 GUI（无需 ROS2）
+
+> ⚠️ **前置条件：请先完成 [ArUco 相机校准](#4-aruco-相机校准必须)，确保 `config.yaml` 中 `index_map` 正确。**
+
+直接使用 `uv` 运行，**无需安装 ROS2**：
+
+```bash
 uv run scripts/recorder_gui.py
 ```
 
-## 回放工具（playback_gui.py）使用方法
+### 界面说明
 
-用于同步回放多相机视频和 IMU 数据可视化。
+**左侧控制面板**：
 
-### 1) 启动回放 GUI
+| 控件 | 说明 |
+|------|------|
+| Camera IDs | /dev/video 设备 ID 列表，可手动编辑或点击「扫描」自动填充 |
+| ↻ 扫描可用相机 | 自动扫描 `/dev/video*` 并按 config 顺序排列 |
+| 分辨率 / FPS | 录制参数（默认 640×480 @ 30fps） |
+| 输出目录 | 录像保存路径（默认 `~/recordings`） |
+| IMU Port / Baud | 串口设备和波特率 |
 
-```bash
-uv run scripts/data_playback_gui.py
+**录制流程**：
+
+1. 点击「扫描可用相机」确认 8 路相机全部识别
+2. 确认 IMU Port 正确（可通过 `imu_find_port.py` 查找）
+3. 点击「开始录制」→ 倒计时 3 秒后同步启动所有相机和 IMU
+4. 录制完成后点击「停止录制」
+
+**输出文件结构**：
+
 ```
-
-### 2) 准备数据目录
-
-默认会扫描 `~/recordings`，也可以在界面左上角点击“浏览”选择其他目录。
-
-每条录制数据建议包含：
-
-```text
-recording_YYYYMMDD_HHMMSS/
-├── 0.mp4
-├── 1.mp4
+~/recordings/recording_20260307_143022/
+├── 0.mp4        # cam0 视频
+├── 1.mp4        # cam1 视频
 ├── ...
-└── imu_data.txt   # 可选（没有也可播放视频）
+├── 7.mp4        # cam7 视频
+└── imu_data.txt # IMU 时序数据
 ```
 
-### 3) 界面操作
+---
 
-- 左侧列表选择某次录制，双击或点“播放”开始。
-- “暂停/继续”控制播放状态。
-- `<<`、`<`、`>`、`>>` 分别为 -30s、-5s、+5s、+30s 跳转。
-- 可拖动进度条定位到任意时间。
-- 速度支持 `0.25x ~ 4.0x`。
-- 有 IMU 数据时可点击“3D姿态”打开交互 3D 姿态窗口。
+## 6. ROS2 驱动模式
 
-## 项目结构
+> ⚠️ **前置条件：请先完成 [ArUco 相机校准](#4-aruco-相机校准必须)，确保 `config.yaml` 中 `index_map` 正确。**
 
-```
-software/
-├── scripts/recorder_gui.py   # 主程序（GUI）
-├── config/config.yaml   # 配置文件
-├── pyproject.toml       # 项目依赖配置
-│
-├── camera/              # 相机模块
-│   ├── multi_camera.py  # 多线程相机流
-│   └── mp_camera.py     # 多进程相机管理
-│
-├── imu/                 # IMU 模块
-│   ├── imu_manager.py   # IMU 管理器
-│   ├── port_manager.py  # 串口管理
-│   └── yis_std_dec.py   # 协议解码
-│
-└── scripts/             # 辅助脚本
-    ├── imu_test.py      # IMU 测试
-    ├── visualize.py     # 2D 可视化
-    └── visualize_3d.py  # 3D 可视化
-```
-
-## 功能特性
-
-- **多进程架构**：每个相机独立进程，绑过 Python GIL
-- **同步录制**：多相机 + IMU 数据同步采集
-- **实时预览**：低延迟相机画面预览
-- **高帧率**：支持 30fps @ 640x480
-
-## 输出格式
-
-每次录制生成带时间戳的目录：
-
-```
-recording_20260207_120000/
-├── 0.mp4              # 相机 0 视频
-├── 1.mp4              # 相机 1 视频
-├── imu_data.txt       # IMU 数据（CSV）
-└── recording_info.txt # 录制信息
-```
-
-## 配置
-
-编辑 `config/config.yaml`：
-
-```yaml
-camera:
-  ids: [0, 1, 2, 3]    # 相机 ID 列表
-  width: 640
-  height: 480
-
-imu:
-  port: /dev/tty.usbserial-xxx
-  bps: 460800
-```
-
-## ROS2 驱动包
-
-仓库已新增标准 ROS2 Python 包：
-
-- [helmet_recorder_ros2/](helmet_recorder_ros2/)
-
-构建与运行：
+### 6.1 编译
 
 ```bash
+cd /path/to/helmet_recorder_tools
 colcon build --packages-select helmet_recorder_ros2
 source install/setup.bash
-
-ros2 run helmet_recorder_ros2 camera_publisher
-ros2 run helmet_recorder_ros2 aruco_calib
-ros2 run helmet_recorder_ros2 save_cam_extrinsics
 ```
 
-## 脚本命名规范（scripts）
+### 6.2 Launch 参数说明
 
-已统一为按功能前缀命名：
+Launch 文件：`helmet_recorder_ros2/launch/capture_system.launch.py`
 
-- `cam_*`：相机标定与外参可视化
-- `imu_*`：IMU 工具与可视化
-- `ros2_cam_*`：ROS2 相机相关脚本
-- `data_*`：数据回放与处理
+| 参数 | 默认值 | 可选值 | 说明 |
+|------|--------|--------|------|
+| `config_path` | `''` | 任意路径 | 配置文件路径，留空时自动查找当前目录下的 `config/config.yaml` |
+| `enable_imu` | `true` | `true` / `false` | 是否启动 IMU 发布节点，`false` 时仅发布相机话题 |
+| `enable_viewer` | `true` | `true` / `false` | 是否启动可视化窗口，`false` 为无头模式（纯话题发布） |
+| `high_res` | `true` | `true` / `false` | 可视化分辨率：`true`=640×480（高清），`false`=160×120（优先帧率） |
 
-常用新脚本：
+**节点自动选择逻辑**：
 
-- `scripts/data_playback_gui.py`
-- `scripts/cam_calib_standalone.py`
-- `scripts/cam_extrinsics_visualizer.py`
-- `scripts/ros2_cam_publisher.py`
-- `scripts/ros2_cam_aruco_calib.py`
-- `scripts/ros2_cam_save_extrinsics.py`
+```
+enable_imu=true  + enable_viewer=true  → camera_imu_vis（相机+IMU联合可视化）
+enable_imu=false + enable_viewer=true  → multi_cam_vis（仅相机网格）
+任意              + enable_viewer=false → 无可视化（仅发布话题）
+```
 
-旧名对照（已重命名）：
+**退出行为**：关闭可视化窗口（按 `q`）会自动触发所有节点退出。
 
-- `playback_gui.py` -> `data_playback_gui.py`
-- `standalone_calib.py` -> `cam_calib_standalone.py`
-- `visualize_cam_extrinsics.py` -> `cam_extrinsics_visualizer.py`
-- `find_imu_port.py` -> `imu_find_port.py`
-- `imu_test.py` -> `imu_yesense_test.py`
-- `visualize.py` -> `imu_visualize_2d.py`
-- `visualize_3d.py` -> `imu_visualize_3d.py`
-- `ros2_camera_publisher.py` -> `ros2_cam_publisher.py`
-- `ros2_camera_aruco_calib.py` -> `ros2_cam_aruco_calib.py`
-- `ros2_save_cam_extrinsics.py` -> `ros2_cam_save_extrinsics.py`
-- `ros2_multi_cam_vis.py` -> `ros2_cam_viewer.py`
-- `ros2_multi_cam_aruco_vis.py` -> `ros2_cam_aruco_viewer.py`
+### 6.3 常用启动命令
+
+**完整模式（相机 + IMU + 可视化）**：
+
+```bash
+ros2 launch helmet_recorder_ros2 capture_system.launch.py
+```
+
+**高分辨率可视化**（默认即为高清）：
+
+```bash
+ros2 launch helmet_recorder_ros2 capture_system.launch.py high_res:=true
+```
+
+**低分辨率模式**（优先帧率，适合性能受限场景）：
+
+```bash
+ros2 launch helmet_recorder_ros2 capture_system.launch.py high_res:=false
+```
+
+**仅相机，无 IMU**：
+
+```bash
+ros2 launch helmet_recorder_ros2 capture_system.launch.py enable_imu:=false
+```
+
+**无头模式**（仅发布话题，不显示窗口）：
+
+```bash
+ros2 launch helmet_recorder_ros2 capture_system.launch.py enable_viewer:=false
+```
+
+**指定配置文件路径**：
+
+```bash
+ros2 launch helmet_recorder_ros2 capture_system.launch.py \
+    config_path:=/path/to/config/config.yaml
+```
+
+**可视化窗口按键**：
+
+| 按键 | 功能 |
+|------|------|
+| `q` | 退出（并关闭所有节点） |
+| `f` | 切换全屏 |
+
+**话题列表**：
+
+```bash
+# 相机话题
+/helmet/cam0/image_raw  ...  /helmet/cam7/image_raw
+
+# IMU 话题
+/helmet/imu/data
+```
+
+---
+
+## 7. 实用工具脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `uv run scripts/imu_find_port.py` | 拔插检测 IMU 串口，可自动写入 config |
+| `uv run scripts/cam_extrinsics_visualizer.py` | 3D 可视化相机外参布局 |
+| `uv run scripts/system_check.py` | 系统环境检查（相机、IMU、依赖） |

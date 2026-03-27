@@ -165,20 +165,55 @@ uv run scripts/recorder_gui.py
 
 > ⚠️ **前置条件：请先完成 [ArUco 相机校准](#4-aruco-相机校准必须)，确保 `config.yaml` 中 `index_map` 正确。**
 
-### 6.1 编译
+### 6.1 安装与编译
 
-将包软链接或复制到 catkin 工作空间，然后编译：
+#### 方法一：软链接（推荐）
+
+适合本地开发，修改 Python 源码无需重新编译：
 
 ```bash
-# 软链接（推荐，修改源码无需重新编译 Python）
+# 1. 创建软链接到 catkin 工作空间
 ln -s /path/to/helmet_recorder_tools/helmet_recorder_ros ~/catkin_ws/src/
 
+# 2. 编译
 cd ~/catkin_ws
 catkin_make --pkg helmet_recorder_ros
-# 或使用 catkin build
+# 或使用 catkin build（需先安装 python3-catkin-tools）
 catkin build helmet_recorder_ros
 
+# 3. 每次新终端都需要 source
 source devel/setup.bash
+```
+
+**注意事项：**
+- 软链接方式下，`config/config.yaml` 会自动通过 `rospkg` 定位到项目根目录
+- 修改 Python 代码后无需重新编译（catkin devel space 使用 develop 模式）
+- 修改 CMakeLists.txt、package.xml、launch 文件后需重新 `catkin_make`
+
+#### 方法二：直接复制（适合部署）
+
+```bash
+# 1. 复制整个包到 catkin 工作空间
+cp -r /path/to/helmet_recorder_tools/helmet_recorder_ros ~/catkin_ws/src/
+
+# 2. 同时需要复制 config 目录（或在 launch 时指定绝对路径）
+cp -r /path/to/helmet_recorder_tools/config ~/catkin_ws/src/helmet_recorder_ros/
+
+# 3. 编译
+cd ~/catkin_ws && catkin_make --pkg helmet_recorder_ros && source devel/setup.bash
+```
+
+#### 验证安装
+
+```bash
+# 检查包是否被识别
+rospack find helmet_recorder_ros
+
+# 检查 Python 模块是否可导入
+python3 -c "import helmet_recorder_ros; print('OK')"
+
+# 检查节点是否可执行
+rosrun helmet_recorder_ros camera_publisher.py --help
 ```
 
 ### 6.2 Launch 参数说明

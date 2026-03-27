@@ -172,23 +172,21 @@ uv run scripts/recorder_gui.py
 适合本地开发，修改 Python 源码无需重新编译：
 
 ```bash
-# 1. 创建软链接到 catkin 工作空间
+# 1. 创建软链接到 catkin 工作空间（必须使用绝对路径）
+mkdir -p ~/catkin_ws/src
 ln -s /path/to/helmet_recorder_tools/helmet_recorder_ros ~/catkin_ws/src/
 
 # 2. 编译
 cd ~/catkin_ws
-catkin_make --pkg helmet_recorder_ros
-# 或使用 catkin build（需先安装 python3-catkin-tools）
-catkin build helmet_recorder_ros
+catkin_make
 
 # 3. 每次新终端都需要 source
 source devel/setup.bash
 ```
 
 **注意事项：**
-- 软链接方式下，`config/config.yaml` 会自动通过 `rospkg` 定位到项目根目录
-- 修改 Python 代码后无需重新编译（catkin devel space 使用 develop 模式）
-- 修改 CMakeLists.txt、package.xml、launch 文件后需重新 `catkin_make`
+- **必须使用绝对路径**创建软链接，相对路径会导致 catkin 编译失败
+- 软链接方式下，`config/config.yaml` 会自动通过 `rospkg` 定位到项目根目录（`helmet_recorder_tools/config/`）
 
 #### 方法二：直接复制（适合部署）
 
@@ -200,7 +198,7 @@ cp -r /path/to/helmet_recorder_tools/helmet_recorder_ros ~/catkin_ws/src/
 cp -r /path/to/helmet_recorder_tools/config ~/catkin_ws/src/helmet_recorder_ros/
 
 # 3. 编译
-cd ~/catkin_ws && catkin_make --pkg helmet_recorder_ros && source devel/setup.bash
+cd ~/catkin_ws && catkin_make && source devel/setup.bash
 ```
 
 #### 验证安装

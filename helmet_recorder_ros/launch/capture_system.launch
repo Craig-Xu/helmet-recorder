@@ -1,0 +1,48 @@
+<launch>
+  <!-- 参数说明：
+       config_path   : 配置文件路径，留空时自动查找当前目录下的 config/config.yaml
+       enable_imu    : 是否启动 IMU 发布节点（true/false）
+       enable_viewer : 是否启动可视化窗口，false 为无头模式（仅发布话题）
+       high_res      : 可视化分辨率，true=640x480，false=160x120（优先帧率）
+  -->
+  <arg name="config_path"   default=""/>
+  <arg name="enable_imu"    default="true"/>
+  <arg name="enable_viewer" default="true"/>
+  <arg name="high_res"      default="true"/>
+
+  <!-- 相机发布节点（始终启动） -->
+  <node pkg="helmet_recorder_ros" type="camera_publisher.py"
+        name="helmet_camera_publisher" output="screen">
+    <param name="config_path" value="$(arg config_path)"/>
+  </node>
+
+  <!-- IMU 发布节点（条件启动） -->
+  <group if="$(arg enable_imu)">
+    <node pkg="helmet_recorder_ros" type="imu_publisher.py"
+          name="helmet_imu_publisher" output="screen">
+      <param name="config_path" value="$(arg config_path)"/>
+    </node>
+  </group>
+
+  <!-- 可视化节点（条件启动） -->
+  <group if="$(arg enable_viewer)">
+    <!-- 相机 + IMU 联合可视化（enable_imu=true） -->
+    <group if="$(arg enable_imu)">
+      <node pkg="helmet_recorder_ros" type="camera_imu_vis.py"
+            name="camera_imu_visualizer" output="screen" required="true">
+        <param name="config_path" value="$(arg config_path)"/>
+        <param name="high_res"    value="$(arg high_res)"/>
+      </node>
+    </group>
+
+    <!-- 纯相机可视化（enable_imu=false） -->
+    <group unless="$(arg enable_imu)">
+      <node pkg="helmet_recorder_ros" type="multi_cam_vis.py"
+            name="multi_camera_visualizer" output="screen" required="true">
+        <param name="config_path" value="$(arg config_path)"/>
+        <param name="high_res"    value="$(arg high_res)"/>
+      </node>
+    </group>
+  </group>
+
+</launch>

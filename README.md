@@ -1,6 +1,6 @@
 # Helmet Recorder Tools
 
-多相机 + IMU 数据采集头盔工具集。支持独立 GUI 录制（无需 ROS2）和 ROS2 驱动两种使用模式。
+多相机 + IMU 数据采集头盔工具集。支持独立 GUI 录制（无需 ROS）和 ROS1 Noetic 驱动两种使用模式。
 
 ---
 
@@ -10,8 +10,8 @@
 2. [安装](#2-安装)
 3. [配置文件](#3-配置文件)
 4. [ArUco 相机校准（必须）](#4-aruco-相机校准必须)
-5. [独立录制 GUI（无需 ROS2）](#5-独立录制-gui无需-ros2)
-6. [ROS2 驱动模式](#6-ros2-驱动模式)
+5. [独立录制 GUI（无需 ROS）](#5-独立录制-gui无需-ros)
+6. [ROS1 驱动模式](#6-ros1-驱动模式)
    - [编译](#61-编译)
    - [Launch 参数说明](#62-launch-参数说明)
    - [常用启动命令](#63-常用启动命令)
@@ -25,8 +25,8 @@
 |------|------|
 | 相机 | 8 路 USB 相机，支持 MJPG 格式（USB 带宽允许 8×640×480@30fps） |
 | IMU | Yesense 系列 IMU，串口连接 |
-| 系统 | Ubuntu 22.04，Python ≥ 3.10 |
-| ROS2 | Humble（仅 ROS2 模式需要） |
+| 系统 | Ubuntu 20.04，Python ≥ 3.8 |
+| ROS1 | Noetic（仅 ROS1 模式需要） |
 
 ---
 
@@ -82,7 +82,7 @@ uv run scripts/imu_find_port.py --auto-write
 
 ## 4. ArUco 相机校准（必须）
 
-> ⚠️ **重要：每次重新连接相机或系统重启后，USB 设备枚举顺序可能发生变化，导致 `/dev/video*` 编号与物理相机位置错位。必须在使用录制或 ROS2 发布前运行一次 ArUco 校准，以确保相机编号顺序正确。**
+> ⚠️ **重要：每次重新连接相机或系统重启后，USB 设备枚举顺序可能发生变化，导致 `/dev/video*` 编号与物理相机位置错位。必须在使用录制或 ROS1 发布前运行一次 ArUco 校准，以确保相机编号顺序正确。**
 
 校准使用 **ArUco marker_0**（ID=0，字典 DICT_6X6_1000）作为公共参考点，脚本会自动识别各相机看到 marker 的位置关系，重新排列 `index_map` 并写入 `config/config.yaml`。
 
@@ -119,11 +119,11 @@ uv run scripts/cam_calib_standalone.py
 
 ---
 
-## 5. 独立录制 GUI（无需 ROS2）
+## 5. 独立录制 GUI（无需 ROS）
 
 > ⚠️ **前置条件：请先完成 [ArUco 相机校准](#4-aruco-相机校准必须)，确保 `config.yaml` 中 `index_map` 正确。**
 
-直接使用 `uv` 运行，**无需安装 ROS2**：
+直接使用 `uv` 运行，**无需安装 ROS**：
 
 ```bash
 uv run scripts/recorder_gui.py
@@ -161,21 +161,29 @@ uv run scripts/recorder_gui.py
 
 ---
 
-## 6. ROS2 驱动模式
+## 6. ROS1 驱动模式
 
 > ⚠️ **前置条件：请先完成 [ArUco 相机校准](#4-aruco-相机校准必须)，确保 `config.yaml` 中 `index_map` 正确。**
 
 ### 6.1 编译
 
+将包软链接或复制到 catkin 工作空间，然后编译：
+
 ```bash
-cd /path/to/helmet_recorder_tools
-colcon build --packages-select helmet_recorder_ros2
-source install/setup.bash
+# 软链接（推荐，修改源码无需重新编译 Python）
+ln -s /path/to/helmet_recorder_tools/helmet_recorder_ros ~/catkin_ws/src/
+
+cd ~/catkin_ws
+catkin_make --pkg helmet_recorder_ros
+# 或使用 catkin build
+catkin build helmet_recorder_ros
+
+source devel/setup.bash
 ```
 
 ### 6.2 Launch 参数说明
 
-Launch 文件：`helmet_recorder_ros2/launch/capture_system.launch.py`
+Launch 文件：`helmet_recorder_ros/launch/capture_system.launch`
 
 | 参数 | 默认值 | 可选值 | 说明 |
 |------|--------|--------|------|
@@ -192,44 +200,44 @@ enable_imu=false + enable_viewer=true  → multi_cam_vis（仅相机网格）
 任意              + enable_viewer=false → 无可视化（仅发布话题）
 ```
 
-**退出行为**：关闭可视化窗口（按 `q`）会自动触发所有节点退出。
+**退出行为**：关闭可视化窗口（按 `q`）会自动触发所有节点退出（`required="true"`）。
 
 ### 6.3 常用启动命令
 
 **完整模式（相机 + IMU + 可视化）**：
 
 ```bash
-ros2 launch helmet_recorder_ros2 capture_system.launch.py
+roslaunch helmet_recorder_ros capture_system.launch
 ```
 
 **高分辨率可视化**（默认即为高清）：
 
 ```bash
-ros2 launch helmet_recorder_ros2 capture_system.launch.py high_res:=true
+roslaunch helmet_recorder_ros capture_system.launch high_res:=true
 ```
 
 **低分辨率模式**（优先帧率，适合性能受限场景）：
 
 ```bash
-ros2 launch helmet_recorder_ros2 capture_system.launch.py high_res:=false
+roslaunch helmet_recorder_ros capture_system.launch high_res:=false
 ```
 
 **仅相机，无 IMU**：
 
 ```bash
-ros2 launch helmet_recorder_ros2 capture_system.launch.py enable_imu:=false
+roslaunch helmet_recorder_ros capture_system.launch enable_imu:=false
 ```
 
 **无头模式**（仅发布话题，不显示窗口）：
 
 ```bash
-ros2 launch helmet_recorder_ros2 capture_system.launch.py enable_viewer:=false
+roslaunch helmet_recorder_ros capture_system.launch enable_viewer:=false
 ```
 
 **指定配置文件路径**：
 
 ```bash
-ros2 launch helmet_recorder_ros2 capture_system.launch.py \
+roslaunch helmet_recorder_ros capture_system.launch \
     config_path:=/path/to/config/config.yaml
 ```
 

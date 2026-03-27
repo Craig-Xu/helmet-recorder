@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>helmet_recorder_ros</name>
+  <version>1.0.0</version>
+  <description>多相机 + IMU 数据采集头盔工具集 ROS1 驱动包（Noetic）</description>
+
+  <maintainer email="kai@example.com">kai</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+</package>

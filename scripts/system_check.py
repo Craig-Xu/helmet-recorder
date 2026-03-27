@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 print("=" * 60)
-print("ROS2 Helmet Recorder 系统状态检查")
+print("Helmet Recorder 系统状态检查")
 print("=" * 60)
 print()
 
@@ -17,12 +17,12 @@ print(f"✓ Python 版本: {sys.version.split()[0]}")
 
 # 检查必要的包
 required_packages = {
-    'rclpy': 'ROS2 Python客户端',
+    'rospy': 'ROS1 Python客户端（Noetic）',
     'cv2': 'OpenCV',
     'numpy': 'NumPy',
     'yaml': 'PyYAML',
     'serial': 'PySerial (IMU通信)',
-    'matplotlib': 'Matplotlib (可选,用于FPS监控)',
+    'matplotlib': 'Matplotlib (可选,用于外参可视化)',
 }
 
 print("\n📦 依赖检查:")
@@ -37,19 +37,19 @@ for package, desc in required_packages.items():
         print(f"❌ {package:15s} - {desc} [未安装]")
         missing.append(package)
 
-# 检查ROS2模块
-print("\n🔧 ROS2 模块检查:")
+# 检查 ROS1 模块
+print("\n🔧 ROS1 模块检查:")
 print("-" * 60)
 
 try:
-    from helmet_recorder_ros2.imu.imu_manager import IMUManager
+    from helmet_recorder_ros.imu.imu_manager import IMUManager
     print("✅ IMU 模块导入")
 except Exception as e:
     print(f"❌ IMU 模块导入失败: {e}")
     missing.append('imu_module')
 
 try:
-    from helmet_recorder_ros2.common import load_yaml
+    from helmet_recorder_ros.common import load_yaml
     print("✅ Common 模块导入")
 except Exception as e:
     print(f"❌ Common 模块导入失败: {e}")
@@ -64,12 +64,11 @@ if tty_devices:
     for dev in tty_devices:
         try:
             import os
-            stat = os.stat(dev)
             readable = os.access(dev, os.R_OK)
             writable = os.access(dev, os.W_OK)
             status = "✅" if (readable and writable) else "⚠️ (权限不足)"
             print(f"{status} {dev}")
-        except:
+        except Exception:
             print(f"⚠️  {dev} (无法访问)")
 else:
     print("⚠️  未找到串口设备 (/dev/ttyACM* 或 /dev/ttyUSB*)")
@@ -80,9 +79,8 @@ print("-" * 60)
 
 video_devices = glob.glob('/dev/video*')
 if video_devices:
-    # 只显示偶数设备（通常是主设备）
     main_devices = [d for d in video_devices if int(d.split('video')[-1]) % 2 == 0]
-    for dev in main_devices[:8]:  # 最多显示8个
+    for dev in main_devices[:8]:
         print(f"✅ {dev}")
     if len(main_devices) > 8:
         print(f"   ... 还有 {len(main_devices) - 8} 个设备")
@@ -103,6 +101,8 @@ else:
             print(f"   - {pkg:15s} → pip install pyserial")
         elif pkg == 'matplotlib':
             print(f"   - {pkg:15s} → pip install matplotlib")
+        elif pkg == 'rospy':
+            print(f"   - {pkg:15s} → 需要安装 ROS1 Noetic: sudo apt install ros-noetic-rospy")
         else:
             print(f"   - {pkg:15s}")
 
@@ -114,13 +114,13 @@ if not tty_devices:
 
 if 'serial' not in missing and tty_devices:
     print("\n✅ 可以启动 IMU 发布节点")
-    print("   ros2 run helmet_recorder_ros2 imu_publisher")
+    print("   rosrun helmet_recorder_ros imu_publisher.py")
 
 if len(video_devices) >= 8:
     print("\n✅ 可以启动完整系统")
-    print("   ros2 launch helmet_recorder_ros2 camera_imu_full.launch.py")
+    print("   roslaunch helmet_recorder_ros capture_system.launch")
 elif len(video_devices) > 0:
-    print(f"\n⚠️  只检测到 {len(video_devices)//2} 个相机")
+    print(f"\n⚠️  只检测到 {len(video_devices) // 2} 个相机")
     print("   系统需要 8 个相机")
 
 print("\n" + "=" * 60)

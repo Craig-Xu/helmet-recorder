@@ -12,3 +12,7 @@ __pycache__/
 calib_intrinsics/
 
 .DS_Store
+
+.vscode/
+
+.claude/

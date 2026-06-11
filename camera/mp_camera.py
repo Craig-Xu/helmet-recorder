@@ -64,6 +64,7 @@ def camera_worker_process(
     width: int,
     height: int,
     fps: int,
+    rotate_180: bool,
     output_path: str,
     start_event,
     stop_event,
@@ -205,7 +206,11 @@ def camera_worker_process(
             # 确保分辨率匹配
             if frame.shape[1] != width or frame.shape[0] != height:
                 frame = cv2.resize(frame, (width, height))
-            
+
+            # 安装方向倒置的相机：旋转 180° 后再写盘/预览（180° 旋转不改变分辨率）
+            if rotate_180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+
             new_frames += 1
             frame_count += 1
 
@@ -261,12 +266,14 @@ class MultiProcessCamera:
     4. 使用进程同步原语协调开始/停止
     """
     
-    def __init__(self, camera_id: int, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(self, camera_id: int, width: int = 640, height: int = 480,
+                 fps: int = 30, rotate_180: bool = False):
         self.camera_id = camera_id
         self.width = width
         self.height = height
         self.fps = fps
-        
+        self.rotate_180 = rotate_180
+
         self.process = None
         self.start_event = None
         self.stop_event = None
@@ -312,6 +319,7 @@ class MultiProcessCamera:
                     self.width,
                     self.height,
                     self.fps,
+                    self.rotate_180,
                     str(output_path),
                     self.start_event,
                     self.stop_event,
@@ -447,10 +455,15 @@ class MultiCameraManager:
     统一启动/停止所有相机，保证同步开始录制
     """
     
-    def __init__(self, camera_ids: list, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(self, camera_ids: list, width: int = 640, height: int = 480,
+                 fps: int = 30, rotate_ids=None):
+        # rotate_ids: 需要旋转 180° 的 /dev/video 物理设备号集合
+        rotate_ids = set(rotate_ids or [])
         self.cameras = {}
         for cam_id in camera_ids:
-            self.cameras[cam_id] = MultiProcessCamera(cam_id, width, height, fps)
+            self.cameras[cam_id] = MultiProcessCamera(
+                cam_id, width, height, fps, rotate_180=(cam_id in rotate_ids)
+            )
         self.fps = fps
         self.is_recording = False
     

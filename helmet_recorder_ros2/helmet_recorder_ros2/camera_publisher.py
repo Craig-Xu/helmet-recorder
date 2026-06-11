@@ -75,8 +75,12 @@ class CameraPublisherNode(Node):
         fps = int(self.get_parameter('fps').value)
         cam_to_video = resolve_cam_to_video(camera_ids, cam_cfg.get('index_map', {}))
 
+        # 需要旋转 180° 的逻辑相机编号(cam_id)；置空即关闭
+        self._rotate_cam_ids = {int(c) for c in (cam_cfg.get('rotate_180', []) or [])}
+
         self.get_logger().info(
-            f'config={config_path} cam_to_video={cam_to_video} {width}x{height}@{fps}fps'
+            f'config={config_path} cam_to_video={cam_to_video} {width}x{height}@{fps}fps '
+            f'rotate_180={sorted(self._rotate_cam_ids)}'
         )
 
         self._stop_event = threading.Event()
@@ -88,16 +92,20 @@ class CameraPublisherNode(Node):
             pub = self.create_publisher(Image, topic, qos_profile=_QOS_REALTIME)
             self.get_logger().info(f'Publishing /dev/video{camera_id} -> {topic}')
 
+            rotate_180 = topic_cam_id in self._rotate_cam_ids
+            if rotate_180:
+                self.get_logger().info(f'cam{topic_cam_id} 画面旋转 180°')
+
             thread = threading.Thread(
                 target=self._camera_loop,
-                args=(camera_id, topic_cam_id, width, height, fps, pub),
+                args=(camera_id, topic_cam_id, width, height, fps, pub, rotate_180),
                 daemon=True,
                 name=f'cam{camera_id}',
             )
             self._threads.append(thread)
             thread.start()
 
-    def _camera_loop(self, camera_id: int, topic_cam_id: int, width: int, height: int, fps: int, pub):
+    def _camera_loop(self, camera_id: int, topic_cam_id: int, width: int, height: int, fps: int, pub, rotate_180: bool = False):
         cap = _open_camera(camera_id, width, height, fps)
         if cap is None:
             self.get_logger().error(f'failed to open /dev/video{camera_id}')
@@ -122,6 +130,10 @@ class CameraPublisherNode(Node):
             ret, frame = cap.retrieve()
             if not ret or frame is None:
                 continue
+
+            # 安装方向倒置的相机：旋转 180°（不改变分辨率）
+            if rotate_180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
 
             if not frame.flags['C_CONTIGUOUS']:
                 frame = np.ascontiguousarray(frame)

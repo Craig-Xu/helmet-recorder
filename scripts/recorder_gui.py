@@ -1104,12 +1104,24 @@ class RecorderGUI:
             self.status_var.set("正在启动相机进程...")
             self.root.update()
             
+            # 读取需要旋转 180° 的逻辑相机(cam_id)，翻译为 /dev/video 物理设备号
+            cam_cfg = self.config.get('camera', {})
+            raw_rotate = cam_cfg.get('rotate_180', []) or []
+            if isinstance(raw_rotate, int):
+                raw_rotate = [raw_rotate]
+            rotate_cam_ids = [int(c) for c in raw_rotate if int(c) in self.cam_to_video]
+            rotate_video_ids = {self.cam_to_video[c] for c in rotate_cam_ids}
+
             # 创建多进程相机管理器
             print(f"\n=== 启动多进程相机系统 ===")
             print(f"目标帧率: {fps} fps, 分辨率: {width}x{height}")
             print(f"相机设备顺序(/dev/video): {camera_ids}")
-            
-            self.camera_manager = MultiCameraManager(camera_ids, width, height, fps)
+            if rotate_video_ids:
+                print(f"画面旋转180°: cam{sorted(rotate_cam_ids)} -> /dev/video{sorted(rotate_video_ids)}")
+
+            self.camera_manager = MultiCameraManager(
+                camera_ids, width, height, fps, rotate_ids=rotate_video_ids
+            )
             
             # 启动所有相机进程
             self.camera_ids = self.camera_manager.start_all(self.current_session_dir)

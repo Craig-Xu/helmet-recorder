@@ -46,7 +46,7 @@ def _make_image_msg(width: int, height: int, frame_id: str) -> Image:
 
 
 def _camera_loop(camera_id: int, topic_cam_id: int, width: int, height: int,
-                 fps: int, pub, stop_event: threading.Event):
+                 fps: int, pub, stop_event: threading.Event, rotate_180: bool = False):
     cap = _open_camera(camera_id, width, height, fps)
     if cap is None:
         rospy.logerr(f'failed to open /dev/video{camera_id}')
@@ -71,6 +71,10 @@ def _camera_loop(camera_id: int, topic_cam_id: int, width: int, height: int,
         ret, frame = cap.retrieve()
         if not ret or frame is None:
             continue
+
+        # 安装方向倒置的相机：旋转 180°（不改变分辨率）
+        if rotate_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
 
         if not frame.flags['C_CONTIGUOUS']:
             frame = np.ascontiguousarray(frame)
@@ -101,7 +105,13 @@ def main():
     fps = int(rospy.get_param('~fps', 30))
     cam_to_video = resolve_cam_to_video(camera_ids, cam_cfg.get('index_map', {}))
 
-    rospy.loginfo(f'config={config_path} cam_to_video={cam_to_video} {width}x{height}@{fps}fps')
+    # 需要旋转 180° 的逻辑相机编号(cam_id)；置空即关闭
+    rotate_cam_ids = {int(c) for c in (cam_cfg.get('rotate_180', []) or [])}
+
+    rospy.loginfo(
+        f'config={config_path} cam_to_video={cam_to_video} {width}x{height}@{fps}fps '
+        f'rotate_180={sorted(rotate_cam_ids)}'
+    )
 
     stop_event = threading.Event()
     threads = []
@@ -112,9 +122,13 @@ def main():
         pub = rospy.Publisher(topic, Image, queue_size=1)
         rospy.loginfo(f'Publishing /dev/video{camera_id} -> {topic}')
 
+        rotate_180 = topic_cam_id in rotate_cam_ids
+        if rotate_180:
+            rospy.loginfo(f'cam{topic_cam_id} 画面旋转 180°')
+
         thread = threading.Thread(
             target=_camera_loop,
-            args=(camera_id, topic_cam_id, width, height, fps, pub, stop_event),
+            args=(camera_id, topic_cam_id, width, height, fps, pub, stop_event, rotate_180),
             daemon=True,
             name=f'cam{camera_id}',
         )

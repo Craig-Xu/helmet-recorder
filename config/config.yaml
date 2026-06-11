@@ -22,6 +22,11 @@ camera:
     7: 12
   width: 640
   height: 480
+  # 画面旋转 180°：列出需要旋转的逻辑相机编号(cam_id)，录制与预览同时生效；
+  # 置空 [] 即关闭。当前用于安装方向倒置的 6、7 号相机(cam6/cam7)。
+  rotate_180:
+  - 6
+  - 7
   display:
     max_cols: 4
   extrinsics:
